@@ -80,8 +80,7 @@ PCA_ADDR  = int(config["pca_address"], 16)
 PCA_FREQ  = int(config["pca_frequency"])
 
 MOTOR_CH  = int(config["motor_channel"])
-LED0_CH   = int(config["led0_channel"])  # LED0 = BLINK TEST
-LED1_CH   = int(config["led1_channel"])  # LED1 = SOLID PWM
+LED0_CH   = int(config["led0_channel"])  # LED0 = Blink test
 
 INVERT_MOTOR = bool(config["invert_motor"])
 MOTOR_MIN_PWM = int(config["motor_min_pwm"])  # percent 0..100
@@ -127,9 +126,9 @@ def led0_stop_blinking():
 def on_connect(client, userdata, flags, rc):
     print(f"Connected to MQTT with result code {rc}")
 
+    # Subscriptions
     client.subscribe("homeassistant/number/motor_pwm/set")
     client.subscribe("homeassistant/light/led0_pwm/set")
-    client.subscribe("homeassistant/light/led1_pwm/set")
 
     # Motor number (slider)
     discovery_motor = {
@@ -145,7 +144,7 @@ def on_connect(client, userdata, flags, rc):
     }
     client.publish("homeassistant/number/pca_motor_pwm/config", json.dumps(discovery_motor), retain=True)
 
-    # LED0 = Blink test (ефект blink/solid)
+    # LED0 = Blink test (effect blink/solid)
     discovery_led0_blink = {
         "name": "LED0 Blink Test",
         "unique_id": "pca_led0_blink",
@@ -159,21 +158,9 @@ def on_connect(client, userdata, flags, rc):
     }
     client.publish("homeassistant/light/pca_led0_pwm/config", json.dumps(discovery_led0_blink), retain=True)
 
-    # LED1 = Solid PWM (без ефекти)
-    discovery_led1_solid = {
-        "name": "LED1 PWM",
-        "unique_id": "pca_led1_pwm",
-        "command_topic": "homeassistant/light/led1_pwm/set",
-        "state_topic": "homeassistant/light/led1_pwm/state",
-        "schema": "json",
-        "brightness": True,
-        "availability_topic": "homeassistant/light/led1_pwm/availability",
-    }
-    client.publish("homeassistant/light/pca_led1_pwm/config", json.dumps(discovery_led1_solid), retain=True)
-
+    # Availability
     client.publish("homeassistant/number/motor_pwm/availability", "online", retain=True)
     client.publish("homeassistant/light/led0_pwm/availability", "online", retain=True)
-    client.publish("homeassistant/light/led1_pwm/availability", "online", retain=True)
 
 def on_message(client, userdata, msg):
     global led0_brightness, led0_blink_thread
@@ -185,7 +172,7 @@ def on_message(client, userdata, msg):
             value = float(payload)  # 0..100
             value = max(0.0, min(100.0, value))
 
-            # Правило: 1..10 => 10
+            # Rule: 1..10 => 10
             if 0.0 < value < 10.0:
                 value = 10.0
 
@@ -198,6 +185,7 @@ def on_message(client, userdata, msg):
                 pwm_percent = value
 
             duty = int((pwm_percent / 100.0) * 4095)
+            duty = max(0, min(4095, duty))
             pca.set_duty_12bit(MOTOR_CH, duty)
             client.publish("homeassistant/number/motor_pwm/state", str(value))
 
@@ -225,27 +213,12 @@ def on_message(client, userdata, msg):
                         json.dumps({"state": "ON", "brightness": led0_brightness, "effect": "blink"})
                     )
                 else:
-                    # solid
                     led0_stop_blinking()
                     pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
                     client.publish(
                         "homeassistant/light/led0_pwm/state",
                         json.dumps({"state": "ON", "brightness": led0_brightness, "effect": "solid"})
                     )
-
-        elif topic == "homeassistant/light/led1_pwm/set":
-            data = json.loads(payload)
-            state = data.get("state")
-
-            if state == "ON":
-                brightness = int(data.get("brightness", 255))
-                brightness = max(0, min(255, brightness))
-                pca.set_duty_12bit(LED1_CH, brightness_to_12bit(brightness))
-                client.publish("homeassistant/light/led1_pwm/state",
-                               json.dumps({"state": "ON", "brightness": brightness}))
-            else:
-                pca.set_duty_12bit(LED1_CH, 0)
-                client.publish("homeassistant/light/led1_pwm/state", json.dumps({"state": "OFF"}))
 
     except Exception as e:
         print(f"Error processing {topic}: {e}")
