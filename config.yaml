@@ -1,28 +1,28 @@
 name: "PCA9685 PWM Controller"
-version: "0.0.2"
+version: "0.0.3"
 slug: "pca9685_pwm"
 description: "Control PCA9685 PWM board via MQTT for motors and LEDs"
+
+init: false
+
 arch:
   - aarch64
   - armv7
   - armhf
   - amd64
+
 startup: "services"
 boot: auto
 
-
 host_network: true
 homeassistant_api: true
-
 
 map:
   - config
   - dev
 
-# I2C устройство
 devices:
   - /dev/i2c-1:/dev/i2c-1:rw
-
 
 options:
   mqtt_host: "core-mosquitto"
