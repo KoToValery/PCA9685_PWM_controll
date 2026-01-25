@@ -4,13 +4,14 @@ import json
 import threading
 import paho.mqtt.client as mqtt
 
-# Задай environment variables преди импорт на board модула
-os.environ["BLINKA_FORCE_BOARD"] = "RASPBERRY_PI_5"
-os.environ["BLINKA_FORCE_CHIP"] = "BCM2712"
+
+os.environ["BLINKA_FORCEBOARD"] = "RASPBERRY_PI_5"
+os.environ["BLINKA_FORCECHIP"] = "BCM2712"
 
 import board
 import busio
 from adafruit_pca9685 import PCA9685
+
 
 # Четене на опции от /data/options.json
 with open('/data/options.json') as f:
