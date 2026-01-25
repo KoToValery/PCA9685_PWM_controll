@@ -1,5 +1,5 @@
 
-FROM homeassistant/aarch64-base-python:3.12
+FROM python:3.11-slim
 
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
