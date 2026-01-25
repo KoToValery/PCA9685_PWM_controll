@@ -1,111 +1,145 @@
-import os
 import time
 import json
 import threading
+import math
+from smbus2 import SMBus
 import paho.mqtt.client as mqtt
 
+# ---------- PCA9685 low-level driver via smbus2 ----------
 
-os.environ["BLINKA_FORCEBOARD"] = "RASPBERRY_PI_5"
-os.environ["BLINKA_FORCECHIP"] = "BCM2712"
+MODE1      = 0x00
+MODE2      = 0x01
+PRESCALE   = 0xFE
+LED0_ON_L  = 0x06
+ALL_LED_ON_L  = 0xFA
 
-import board
-import busio
-from adafruit_pca9685 import PCA9685
+# Bits
+MODE1_RESTART = 0x80
+MODE1_SLEEP   = 0x10
+MODE1_AI      = 0x20  # Auto-increment
+MODE2_OUTDRV  = 0x04  # Totem pole
 
+OSC_HZ = 25_000_000  # PCA9685 internal oscillator typical
 
-# Четене на опции от /data/options.json
-with open('/data/options.json') as f:
+class PCA9685:
+    def __init__(self, bus_num: int, address: int):
+        self.address = address
+        self.bus = SMBus(bus_num)
+
+        # Init sequence
+        self._write8(MODE1, MODE1_AI)           # auto-increment on
+        self._write8(MODE2, MODE2_OUTDRV)       # output driver
+        time.sleep(0.01)
+
+    def close(self):
+        try:
+            self.bus.close()
+        except Exception:
+            pass
+
+    def _write8(self, reg, val):
+        self.bus.write_byte_data(self.address, reg, val & 0xFF)
+
+    def _read8(self, reg):
+        return self.bus.read_byte_data(self.address, reg)
+
+    def set_pwm_freq(self, freq_hz: float):
+        # prescale = round(osc / (4096*freq)) - 1
+        prescale = int(round(OSC_HZ / (4096.0 * float(freq_hz)) - 1.0))
+        prescale = max(3, min(255, prescale))  # datasheet bounds-ish
+
+        oldmode = self._read8(MODE1)
+        sleepmode = (oldmode & 0x7F) | MODE1_SLEEP
+        self._write8(MODE1, sleepmode)
+        time.sleep(0.005)
+        self._write8(PRESCALE, prescale)
+        time.sleep(0.005)
+        self._write8(MODE1, oldmode)
+        time.sleep(0.005)
+        self._write8(MODE1, oldmode | MODE1_RESTART | MODE1_AI)
+        time.sleep(0.005)
+
+    def set_pwm(self, channel: int, on: int, off: int):
+        channel = int(channel)
+        if not (0 <= channel <= 15):
+            raise ValueError("channel must be 0..15")
+        on = int(max(0, min(4095, on)))
+        off = int(max(0, min(4095, off)))
+
+        reg = LED0_ON_L + 4 * channel
+        data = [on & 0xFF, (on >> 8) & 0xFF, off & 0xFF, (off >> 8) & 0xFF]
+        self.bus.write_i2c_block_data(self.address, reg, data)
+
+    def set_duty_12bit(self, channel: int, duty: int):
+        duty = int(max(0, min(4095, duty)))
+        # Simple PWM: ON=0, OFF=duty
+        self.set_pwm(channel, 0, duty)
+
+# ---------- Read HA add-on options ----------
+with open("/data/options.json", "r") as f:
     config = json.load(f)
 
-MQTT_HOST = config['mqtt_host']
-MQTT_PORT = config['mqtt_port']
-MQTT_USER = config.get('mqtt_username', None)
-MQTT_PASS = config.get('mqtt_password', None)
-PCA_ADDR = int(config['pca_address'], 16)
-PCA_FREQ = config['pca_frequency']
-MOTOR_CH = config['motor_channel']
-LED0_CH = config['led0_channel']
-LED1_CH = config['led1_channel']
-INVERT_MOTOR = config['invert_motor']
-MOTOR_MIN_PWM = config['motor_min_pwm']
+MQTT_HOST = config["mqtt_host"]
+MQTT_PORT = config["mqtt_port"]
+MQTT_USER = config.get("mqtt_username") or None
+MQTT_PASS = config.get("mqtt_password") or None
 
-# Инициализация на I2C и PCA9685 (оптимизирано за Pi 5 в Docker)
-print("Initializing I2C bus...")
-try:
-    # Опит за автоматична инициализация
-    i2c_bus = board.I2C()
-    print("I2C initialized using board.I2C()")
-except Exception as e:
-    print(f"board.I2C() failed: {e}")
-    # Fallback: директно отваряне на I2C Bus 1
-    try:
-        i2c_bus = busio.I2C(board.SCL, board.SDA)
-        print("I2C initialized using busio.I2C(SCL, SDA)")
-    except Exception as e2:
-        print(f"busio.I2C() also failed: {e2}")
-        raise
+I2C_BUS = int(config.get("i2c_bus", 1))  # optional, default 1
+PCA_ADDR = int(config["pca_address"], 16)
+PCA_FREQ = int(config["pca_frequency"])
 
-print(f"Connecting to PCA9685 at address {hex(PCA_ADDR)}...")
-pca = PCA9685(i2c_bus, address=PCA_ADDR)
-pca.frequency = PCA_FREQ
-print(f"PCA9685 initialized at {PCA_FREQ}Hz")
+MOTOR_CH = int(config["motor_channel"])
+LED0_CH = int(config["led0_channel"])
+LED1_CH = int(config["led1_channel"])
 
-# MQTT клиент
+INVERT_MOTOR = bool(config["invert_motor"])
+MOTOR_MIN_PWM = int(config["motor_min_pwm"])  # percent 0..100
+
+# ---------- Init PCA9685 ----------
+print(f"Opening I2C bus {I2C_BUS}, PCA9685 addr={hex(PCA_ADDR)}")
+pca = PCA9685(I2C_BUS, PCA_ADDR)
+pca.set_pwm_freq(PCA_FREQ)
+print(f"PCA9685 frequency set to {PCA_FREQ} Hz")
+
+# ---------- MQTT ----------
 client = mqtt.Client()
 if MQTT_USER and MQTT_PASS:
     client.username_pw_set(MQTT_USER, MQTT_PASS)
 
-# Глобални променливи за blinking
 blink_thread = None
 blink_running = False
 blink_lock = threading.Lock()
-current_brightness_led1 = 0
+current_brightness_led1 = 255
+
+def brightness_to_12bit(brightness_0_255: int) -> int:
+    b = int(max(0, min(255, brightness_0_255)))
+    return int((b / 255.0) * 4095)
 
 def start_blinking():
-    """Thread function за blinking на LED1"""
-    global blink_running, current_brightness_led1
-    print("Starting blink effect...")
+    global blink_running
     blink_running = True
     while blink_running:
-        try:
-            # On: Задай brightness
-            pwm_value = int((current_brightness_led1 / 255) * 4095)
-            pca.channels[LED1_CH].duty_cycle = pwm_value
-            time.sleep(0.5)
-            # Off
-            if blink_running:  # Проверка преди изключване
-                pca.channels[LED1_CH].duty_cycle = 0
-                time.sleep(0.5)
-        except Exception as e:
-            print(f"Error in blink loop: {e}")
-            break
-    # Изключи LED при излизане от loop
-    try:
-        pca.channels[LED1_CH].duty_cycle = 0
-    except:
-        pass
-    print("Blink effect stopped")
+        pca.set_duty_12bit(LED1_CH, brightness_to_12bit(current_brightness_led1))
+        time.sleep(0.5)
+        pca.set_duty_12bit(LED1_CH, 0)
+        time.sleep(0.5)
+    pca.set_duty_12bit(LED1_CH, 0)
 
 def stop_blinking():
-    """Спира blinking thread-а безопасно"""
-    global blink_running, blink_thread, blink_lock
+    global blink_running, blink_thread
     with blink_lock:
-        if blink_running:
-            print("Stopping blink effect...")
-            blink_running = False
-            if blink_thread and blink_thread.is_alive():
-                blink_thread.join(timeout=2)
+        blink_running = False
+        if blink_thread and blink_thread.is_alive():
+            blink_thread.join(timeout=2)
+        blink_thread = None
 
 def on_connect(client, userdata, flags, rc):
-    print(f"Connected to MQTT broker with result code {rc}")
-    
-    # Субскрайб към теми
+    print(f"Connected to MQTT with result code {rc}")
+
     client.subscribe("homeassistant/number/motor_pwm/set")
     client.subscribe("homeassistant/light/led0_pwm/set")
     client.subscribe("homeassistant/light/led1_pwm/set")
-    print("Subscribed to MQTT topics")
-    
-    # MQTT Discovery за мотора
+
     discovery_motor = {
         "name": "Motor PWM",
         "unique_id": "pca_motor_pwm",
@@ -118,8 +152,7 @@ def on_connect(client, userdata, flags, rc):
         "availability_topic": "homeassistant/number/motor_pwm/availability"
     }
     client.publish("homeassistant/number/pca_motor_pwm/config", json.dumps(discovery_motor), retain=True)
-    
-    # MQTT Discovery за LED0 (PWM light)
+
     discovery_led0 = {
         "name": "Test LED 0 PWM",
         "unique_id": "pca_led0_pwm",
@@ -130,8 +163,7 @@ def on_connect(client, userdata, flags, rc):
         "availability_topic": "homeassistant/light/led0_pwm/availability"
     }
     client.publish("homeassistant/light/pca_led0_pwm/config", json.dumps(discovery_led0), retain=True)
-    
-    # MQTT Discovery за LED1 (с effects: solid и blink)
+
     discovery_led1 = {
         "name": "Test LED 1 Blink",
         "unique_id": "pca_led1_pwm",
@@ -144,109 +176,79 @@ def on_connect(client, userdata, flags, rc):
         "availability_topic": "homeassistant/light/led1_pwm/availability"
     }
     client.publish("homeassistant/light/pca_led1_pwm/config", json.dumps(discovery_led1), retain=True)
-    
-    # Публикуване на availability
+
     client.publish("homeassistant/number/motor_pwm/availability", "online", retain=True)
     client.publish("homeassistant/light/led0_pwm/availability", "online", retain=True)
     client.publish("homeassistant/light/led1_pwm/availability", "online", retain=True)
-    print("MQTT discovery messages published")
 
 def on_message(client, userdata, msg):
+    global current_brightness_led1, blink_thread
     topic = msg.topic
-    payload = msg.payload.decode('utf-8')
-    
+    payload = msg.payload.decode("utf-8")
+
     try:
         if topic == "homeassistant/number/motor_pwm/set":
-            # Мотор логика
-            value = float(payload)
+            value = float(payload)  # 0..100 (percent)
+            value = max(0.0, min(100.0, value))
+
             if INVERT_MOTOR:
                 if value == 0:
-                    pwm_percent = 100
+                    pwm_percent = 100.0
                 else:
-                    pwm_percent = MOTOR_MIN_PWM - (value * MOTOR_MIN_PWM / 100)
+                    pwm_percent = MOTOR_MIN_PWM - (value * MOTOR_MIN_PWM / 100.0)
             else:
                 pwm_percent = value
-            
-            pwm_value = int(pwm_percent / 100 * 4095)
-            pwm_value = max(0, min(4095, pwm_value))  # Clamp to 0-4095
-            pca.channels[MOTOR_CH].duty_cycle = pwm_value
+
+            duty = int((pwm_percent / 100.0) * 4095)
+            pca.set_duty_12bit(MOTOR_CH, duty)
             client.publish("homeassistant/number/motor_pwm/state", str(value))
-            print(f"Set motor PWM to {pwm_percent:.1f}% (input: {value}%, duty: {pwm_value})")
-        
+            print(f"Motor set: input={value}% -> pwm={pwm_percent}% duty={duty}")
+
         elif topic == "homeassistant/light/led0_pwm/set":
-            # LED0 PWM светлина
             data = json.loads(payload)
-            state = data.get('state')
-            
-            if state == 'ON':
-                brightness = data.get('brightness', 255)
-                pwm_value = int((brightness / 255) * 4095)
-                pca.channels[LED0_CH].duty_cycle = pwm_value
-                client.publish("homeassistant/light/led0_pwm/state", 
-                             json.dumps({"state": "ON", "brightness": brightness}))
-                print(f"LED0 ON at brightness {brightness}")
-            elif state == 'OFF':
-                pca.channels[LED0_CH].duty_cycle = 0
+            state = data.get("state")
+
+            if state == "ON":
+                brightness = int(data.get("brightness", 255))
+                pca.set_duty_12bit(LED0_CH, brightness_to_12bit(brightness))
+                client.publish("homeassistant/light/led0_pwm/state",
+                               json.dumps({"state": "ON", "brightness": brightness}))
+            else:
+                pca.set_duty_12bit(LED0_CH, 0)
                 client.publish("homeassistant/light/led0_pwm/state", json.dumps({"state": "OFF"}))
-                print("LED0 OFF")
-        
+
         elif topic == "homeassistant/light/led1_pwm/set":
-            # LED1 с blink ефект
             data = json.loads(payload)
-            state = data.get('state')
-            brightness = data.get('brightness', 255)
-            effect = data.get('effect', 'solid')
-            
-            global current_brightness_led1, blink_thread, blink_lock
-            current_brightness_led1 = brightness
-            
-            if state == 'OFF':
+            state = data.get("state")
+            brightness = int(data.get("brightness", 255))
+            effect = data.get("effect", "solid")
+
+            current_brightness_led1 = max(0, min(255, brightness))
+
+            if state == "OFF":
                 stop_blinking()
-                pca.channels[LED1_CH].duty_cycle = 0
+                pca.set_duty_12bit(LED1_CH, 0)
                 client.publish("homeassistant/light/led1_pwm/state", json.dumps({"state": "OFF"}))
-                print("LED1 OFF")
-                
-            elif state == 'ON':
-                if effect == 'blink':
+
+            elif state == "ON":
+                if effect == "blink":
                     stop_blinking()
                     with blink_lock:
                         blink_thread = threading.Thread(target=start_blinking, daemon=True)
                         blink_thread.start()
-                    print(f"LED1 blinking at brightness {brightness}")
-                    
-                elif effect == 'solid':
+                else:
                     stop_blinking()
-                    pwm_value = int((brightness / 255) * 4095)
-                    pca.channels[LED1_CH].duty_cycle = pwm_value
-                    print(f"LED1 solid at brightness {brightness}")
-                
-                client.publish("homeassistant/light/led1_pwm/state", 
-                             json.dumps({"state": "ON", "brightness": brightness, "effect": effect}))
-    
+                    pca.set_duty_12bit(LED1_CH, brightness_to_12bit(current_brightness_led1))
+
+                client.publish("homeassistant/light/led1_pwm/state",
+                               json.dumps({"state": "ON", "brightness": current_brightness_led1, "effect": effect}))
+
     except Exception as e:
-        print(f"Error processing message on {topic}: {e}")
+        print(f"Error processing {topic}: {e}")
 
-def on_disconnect(client, userdata, rc):
-    print(f"Disconnected from MQTT broker with code {rc}")
-    if rc != 0:
-        print("Unexpected disconnect, will attempt reconnect...")
-
-# Налагане на callbacks
 client.on_connect = on_connect
 client.on_message = on_message
-client.on_disconnect = on_disconnect
 
-# Свързване към MQTT
-print(f"Connecting to MQTT broker at {MQTT_HOST}:{MQTT_PORT}...")
-try:
-    client.connect(MQTT_HOST, MQTT_PORT, 60)
-    print("Starting MQTT loop...")
-    client.loop_forever()
-except KeyboardInterrupt:
-    print("\nShutting down...")
-    stop_blinking()
-    client.disconnect()
-except Exception as e:
-    print(f"Fatal error: {e}")
-    stop_blinking()
-    raise
+print(f"Connecting MQTT {MQTT_HOST}:{MQTT_PORT} ...")
+client.connect(MQTT_HOST, MQTT_PORT, 60)
+client.loop_forever()
