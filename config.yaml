@@ -24,8 +24,6 @@ map:
 devices:
 
   - /dev/i2c-1:/dev/i2c-1:rw
-  - /dev/gpiochip0:/dev/gpiochip0:rw
-  - /dev/gpiochip4:/dev/gpiochip4:rw
 
 
 options:
