@@ -1,13 +1,16 @@
-FROM python:3.11-slim
 
-# Инсталирай системни зависимости за I2C и компилация
-RUN apk add --no-cache \
+FROM homeassistant/aarch64-base-python:3.12
+
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    musl-dev \
-    linux-headers \
-    i2c-tools
+    libc-dev \
+    linux-libc-dev \
+    i2c-tools \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Инсталирай Python пакети
+
 RUN pip install --no-cache-dir \
     adafruit-circuitpython-pca9685 \
     paho-mqtt
