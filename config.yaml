@@ -1,0 +1,55 @@
+name: "PCA9685 PWM Controller"
+version: "0.0.1"
+slug: "pca9685_pwm"
+description: "Control PCA9685 PWM board via MQTT for motors and LEDs"
+arch:
+  - aarch64
+  - armv7
+  - armhf
+  - amd64
+startup: "services"
+boot: auto
+
+
+host_network: true
+homeassistant_api: true
+
+
+map:
+  - config
+  - dev
+
+# I2C устройство
+devices:
+  - /dev/i2c-1:/dev/i2c-1:rw
+
+
+options:
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_username: "mqtt"
+  mqtt_password: "mqtt_password"
+  pca_address: "0x40"
+  pca_frequency: 1000
+  motor_channel: 0
+  led0_channel: 1
+  led1_channel: 2
+  invert_motor: false
+  motor_min_pwm: 30
+
+schema:
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_username: str?
+  mqtt_password: password?
+  pca_address: match(^0x[0-9A-Fa-f]{2}$)
+  pca_frequency: int(24,1526)
+  motor_channel: int(0,15)
+  led0_channel: int(0,15)
+  led1_channel: int(0,15)
+  invert_motor: bool
+  motor_min_pwm: int(0,100)
+
+environment:
+  MQTT_USER: "mqtt"
+  MQTT_PASS: "mqtt_password"
