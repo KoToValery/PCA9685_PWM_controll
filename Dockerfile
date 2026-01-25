@@ -1,4 +1,4 @@
-FROM homeassistant/aarch64-base-python:3.12-alpine
+FROM python:3.11-slim
 
 # Инсталирай системни зависимости за I2C и компилация
 RUN apk add --no-cache \
