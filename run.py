@@ -83,6 +83,7 @@ MOTOR_CH  = int(config["motor_channel"])
 LED0_CH   = int(config["led0_channel"])  # LED0 = Blink test
 
 MOTOR_MIN_PWM = int(config["motor_min_pwm"])  # percent 0..100 (physical PWM at 0% visual)
+DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))  # default visual duty when enabling
 
 def brightness_to_12bit(brightness_0_255: int) -> int:
     b = int(max(0, min(255, brightness_0_255)))
@@ -221,9 +222,11 @@ def on_message(client, userdata, msg):
             motor_enabled = (payload == "ON")
             
             if motor_enabled:
-                # Motor enabled - update PWM based on current value
+                # Motor enabled - load default duty cycle and update PWM
+                motor_value = float(DEFAULT_DUTY_CYCLE)
                 update_motor_pwm()
                 client.publish("homeassistant/switch/motor_enable/state", "ON")
+                client.publish("homeassistant/number/motor_pwm/state", str(motor_value))
             else:
                 # Motor disabled - set slider to 0 and PWM to maximum (inverted = stopped)
                 motor_value = 0.0
