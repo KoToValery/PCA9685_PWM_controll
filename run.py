@@ -84,20 +84,15 @@ PCA_FREQ  = int(config["pca_frequency"])
 MOTOR_CH  = int(config["motor_channel"])
 LED0_CH   = int(config["led0_channel"])  # LED0 = Blink test
 
-MOTOR_MIN_PWM = int(config["motor_min_pwm"])  # percent 0..100 (physical PWM at 0% visual)
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))  # default visual duty when enabling
 
 # Validate configuration
-if not (0 <= MOTOR_MIN_PWM <= 100):
-    raise ValueError(f"motor_min_pwm must be 0-100, got {MOTOR_MIN_PWM}")
 if not (0 <= DEFAULT_DUTY_CYCLE <= 100):
     raise ValueError(f"default_duty_cycle must be 0-100, got {DEFAULT_DUTY_CYCLE}")
-if MOTOR_MIN_PWM < 50:
-    print(f"WARNING: motor_min_pwm={MOTOR_MIN_PWM}% is low for inverted control (recommended 80-100%)")
 
 print(f"Configuration validated:")
-print(f"  - Motor Min PWM: {MOTOR_MIN_PWM}%")
 print(f"  - Default Duty Cycle: {DEFAULT_DUTY_CYCLE}%")
+print(f"  - PWM mapping: Visual 0%→100% (STOP), Visual 10%→90% (START), Visual 100%→0% (MAX)")
 
 def brightness_to_12bit(brightness_0_255: int) -> int:
     b = int(max(0, min(255, brightness_0_255)))
@@ -160,28 +155,36 @@ def led0_stop_blinking():
     pca.set_duty_12bit(LED0_CH, 0)
 
 def update_motor_pwm():
-    """Update physical motor PWM based on enabled state and visual value"""
+    """Update physical motor PWM based on enabled state and visual value
+    
+    Hardware behavior:
+    - PWM 0% → Motor MAX speed
+    - PWM 90% → Motor START (minimum)
+    - PWM 100% → Motor STOP
+    
+    Visual mapping:
+    - Visual 0% → Physical 100% (STOP)
+    - Visual 1-10% → Physical 90% (MIN/START) - snapped
+    - Visual 11-100% → Physical 89-0% (LINEAR to MAX)
+    """
     global motor_enabled, motor_value
     
     if not motor_enabled:
-        # Motor disabled - full PWM (0% speed in inverted mode)
+        # Motor disabled - 100% PWM = STOP
         pca.set_duty_12bit(MOTOR_CH, 4095)
         return
     
-    # Motor enabled - inverted control
-    # Visual 0% = Physical MOTOR_MIN_PWM%
-    # Visual 100% = Physical 0% (duty cycle 0, no frequency visible on scope)
-    
     visual = motor_value
     
-    # Rule: visual 1..9 => snap to 10
-    if 0.0 < visual < 10.0:
-        visual = 10.0
-    
-    # Inverted calculation
-    # visual 0 => MOTOR_MIN_PWM%
-    # visual 100 => 0%
-    pwm_percent = MOTOR_MIN_PWM - (visual * MOTOR_MIN_PWM / 100.0)
+    # Snap visual 1-10% to physical 90% (START threshold)
+    if 0.0 < visual <= 10.0:
+        pwm_percent = 90.0  # START/MIN
+    elif visual == 0:
+        pwm_percent = 100.0  # STOP
+    else:
+        # Linear mapping for visual 11-100% → physical 89-0%
+        # visual 11% → 89%, visual 100% → 0%
+        pwm_percent = 100.0 - visual
     
     duty = int((pwm_percent / 100.0) * 4095)
     duty = max(0, min(4095, duty))
