@@ -14,8 +14,9 @@ MODE1_RESTART = 0x80
 MODE1_SLEEP   = 0x10
 MODE1_AI      = 0x20
 MODE2_OUTDRV  = 0x04
+PWM_CAL = 1.045  # измерен коефициент
 
-OSC_HZ = 26_125_000
+OSC_HZ = 25_000_000
 
 class PCA9685:
     def __init__(self, bus_num: int, address: int):
@@ -91,7 +92,7 @@ def brightness_to_12bit(brightness_0_255: int) -> int:
 
 print(f"Opening I2C bus {I2C_BUS}, PCA9685 addr={hex(PCA_ADDR)}")
 pca = PCA9685(I2C_BUS, PCA_ADDR)
-pca.set_pwm_freq(PCA_FREQ)
+pca.set_pwm_freq(PCA_FREQ / PWM_CAL)
 print(f"PCA9685 frequency set to {PCA_FREQ} Hz")
 
 # ---------- MQTT ----------
