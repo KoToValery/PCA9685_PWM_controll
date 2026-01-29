@@ -1,6 +1,8 @@
 import time
 import json
 import threading
+import signal
+import sys
 from smbus2 import SMBus
 import paho.mqtt.client as mqtt
 
@@ -85,6 +87,18 @@ LED0_CH   = int(config["led0_channel"])  # LED0 = Blink test
 MOTOR_MIN_PWM = int(config["motor_min_pwm"])  # percent 0..100 (physical PWM at 0% visual)
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))  # default visual duty when enabling
 
+# Validate configuration
+if not (0 <= MOTOR_MIN_PWM <= 100):
+    raise ValueError(f"motor_min_pwm must be 0-100, got {MOTOR_MIN_PWM}")
+if not (0 <= DEFAULT_DUTY_CYCLE <= 100):
+    raise ValueError(f"default_duty_cycle must be 0-100, got {DEFAULT_DUTY_CYCLE}")
+if MOTOR_MIN_PWM < 50:
+    print(f"WARNING: motor_min_pwm={MOTOR_MIN_PWM}% is low for inverted control (recommended 80-100%)")
+
+print(f"Configuration validated:")
+print(f"  - Motor Min PWM: {MOTOR_MIN_PWM}%")
+print(f"  - Default Duty Cycle: {DEFAULT_DUTY_CYCLE}%")
+
 def brightness_to_12bit(brightness_0_255: int) -> int:
     b = int(max(0, min(255, brightness_0_255)))
     return int((b / 255.0) * 4095)
@@ -113,10 +127,26 @@ def led0_start_blinking():
     global led0_blink_running
     led0_blink_running = True
     while led0_blink_running:
+        if not led0_blink_running:  # Double-check before turning on
+            break
         pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
-        time.sleep(0.5)
+        
+        # Sleep in small chunks to respond faster to stop signal
+        for _ in range(5):
+            if not led0_blink_running:
+                break
+            time.sleep(0.1)
+        
+        if not led0_blink_running:
+            break
         pca.set_duty_12bit(LED0_CH, 0)
-        time.sleep(0.5)
+        
+        for _ in range(5):
+            if not led0_blink_running:
+                break
+            time.sleep(0.1)
+    
+    # Ensure LED is off when stopping
     pca.set_duty_12bit(LED0_CH, 0)
 
 def led0_stop_blinking():
@@ -126,6 +156,8 @@ def led0_stop_blinking():
         if led0_blink_thread and led0_blink_thread.is_alive():
             led0_blink_thread.join(timeout=2)
         led0_blink_thread = None
+    # Extra safety: ensure LED is off
+    pca.set_duty_12bit(LED0_CH, 0)
 
 def update_motor_pwm():
     """Update physical motor PWM based on enabled state and visual value"""
@@ -158,6 +190,15 @@ def update_motor_pwm():
 def on_connect(client, userdata, flags, rc):
     print(f"Connected to MQTT with result code {rc}")
 
+    # Device information for grouping all entities together
+    device_info = {
+        "identifiers": ["pca9685_pwm_controller"],
+        "name": "PCA9685 PWM Controller",
+        "model": "PCA9685",
+        "manufacturer": "NXP Semiconductors",
+        "sw_version": "0.0.14"
+    }
+
     # Subscriptions
     client.subscribe("homeassistant/switch/motor_enable/set")
     client.subscribe("homeassistant/number/motor_pwm/set")
@@ -172,6 +213,7 @@ def on_connect(client, userdata, flags, rc):
         "payload_on": "ON",
         "payload_off": "OFF",
         "availability_topic": "homeassistant/switch/motor_enable/availability",
+        "device": device_info
     }
     client.publish("homeassistant/switch/pca_motor_enable/config", json.dumps(discovery_motor_switch), retain=True)
 
@@ -186,6 +228,7 @@ def on_connect(client, userdata, flags, rc):
         "step": 1,
         "unit_of_measurement": "%",
         "availability_topic": "homeassistant/number/motor_pwm/availability",
+        "device": device_info
     }
     client.publish("homeassistant/number/pca_motor_pwm/config", json.dumps(discovery_motor), retain=True)
 
@@ -200,6 +243,7 @@ def on_connect(client, userdata, flags, rc):
         "effect": True,
         "effect_list": ["blink", "solid"],
         "availability_topic": "homeassistant/light/led0_pwm/availability",
+        "device": device_info
     }
     client.publish("homeassistant/light/pca_led0_pwm/config", json.dumps(discovery_led0_blink), retain=True)
 
@@ -291,6 +335,75 @@ def on_message(client, userdata, msg):
 client.on_connect = on_connect
 client.on_message = on_message
 
+# ---------- Safe shutdown handling ----------
+def safe_shutdown(signum=None, frame=None):
+    """Safe shutdown: stop motor, turn off LEDs, close connections"""
+    print("\n========================================")
+    print("SHUTDOWN SIGNAL RECEIVED - Cleaning up...")
+    print("========================================")
+    
+    try:
+        # Stop motor (set to safe state)
+        print("Stopping motor (setting to safe state)...")
+        pca.set_duty_12bit(MOTOR_CH, 4095)  # Full PWM = motor stopped in inverted mode
+        
+        # Stop LED blinking
+        print("Stopping LED0 blinking...")
+        led0_stop_blinking()
+        
+        # Turn off all PWM channels
+        print("Turning off all PWM channels...")
+        for ch in range(16):
+            pca.set_duty_12bit(ch, 0)
+        
+        # Set MQTT availability to offline
+        print("Setting MQTT availability to offline...")
+        client.publish("homeassistant/switch/motor_enable/availability", "offline", retain=True)
+        client.publish("homeassistant/number/motor_pwm/availability", "offline", retain=True)
+        client.publish("homeassistant/light/led0_pwm/availability", "offline", retain=True)
+        
+        # Disconnect MQTT
+        print("Disconnecting MQTT...")
+        client.loop_stop()
+        client.disconnect()
+        
+        # Close I2C bus
+        print("Closing I2C bus...")
+        pca.close()
+        
+        print("========================================")
+        print("Cleanup completed successfully")
+        print("========================================")
+        
+    except Exception as e:
+        print(f"Error during shutdown: {e}")
+    
+    sys.exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, safe_shutdown)  # Docker stop
+signal.signal(signal.SIGINT, safe_shutdown)   # Ctrl+C
+
 print(f"Connecting MQTT {MQTT_HOST}:{MQTT_PORT} ...")
 client.connect(MQTT_HOST, MQTT_PORT, 60)
-client.loop_forever()
+client.loop_start()  # Non-blocking loop in background thread
+
+# Keep alive loop with periodic checks
+try:
+    print("Service running. Press Ctrl+C to stop.")
+    while True:
+        time.sleep(1)
+        
+        # Check if MQTT is still connected
+        if not client.is_connected():
+            print("MQTT disconnected, attempting reconnect...")
+            try:
+                client.reconnect()
+            except Exception as e:
+                print(f"Reconnect failed: {e}")
+        
+except KeyboardInterrupt:
+    safe_shutdown()
+except Exception as e:
+    print(f"Fatal error: {e}")
+    safe_shutdown()
