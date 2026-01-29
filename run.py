@@ -236,7 +236,17 @@ def on_message(client, userdata, msg):
             value = max(0.0, min(100.0, value))
             motor_value = value
             
-            if motor_enabled:
+            # Auto-sync: slider 0 → switch OFF, slider >0 → switch ON
+            if value == 0.0 and motor_enabled:
+                motor_enabled = False
+                client.publish("homeassistant/switch/motor_enable/state", "OFF")
+                update_motor_pwm()
+            elif value > 0.0 and not motor_enabled:
+                motor_enabled = True
+                client.publish("homeassistant/switch/motor_enable/state", "ON")
+                update_motor_pwm()
+            elif motor_enabled:
+                # Just update PWM if already enabled
                 update_motor_pwm()
             
             client.publish("homeassistant/number/motor_pwm/state", str(value))
