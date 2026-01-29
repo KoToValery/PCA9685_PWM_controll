@@ -82,8 +82,7 @@ PCA_FREQ  = int(config["pca_frequency"])
 MOTOR_CH  = int(config["motor_channel"])
 LED0_CH   = int(config["led0_channel"])  # LED0 = Blink test
 
-INVERT_MOTOR = bool(config["invert_motor"])
-MOTOR_MIN_PWM = int(config["motor_min_pwm"])  # percent 0..100
+MOTOR_MIN_PWM = int(config["motor_min_pwm"])  # percent 0..100 (physical PWM at 0% visual)
 
 def brightness_to_12bit(brightness_0_255: int) -> int:
     b = int(max(0, min(255, brightness_0_255)))
@@ -98,6 +97,10 @@ print(f"PCA9685 frequency set to {PCA_FREQ} Hz")
 client = mqtt.Client()
 if MQTT_USER and MQTT_PASS:
     client.username_pw_set(MQTT_USER, MQTT_PASS)
+
+# --- Motor globals ---
+motor_enabled = False
+motor_value = 0.0  # Visual value 0..100
 
 # --- LED0 blink globals ---
 led0_blink_thread = None
@@ -123,12 +126,53 @@ def led0_stop_blinking():
             led0_blink_thread.join(timeout=2)
         led0_blink_thread = None
 
+def update_motor_pwm():
+    """Update physical motor PWM based on enabled state and visual value"""
+    global motor_enabled, motor_value
+    
+    if not motor_enabled:
+        # Motor disabled - full PWM (0% speed in inverted mode)
+        pca.set_duty_12bit(MOTOR_CH, 4095)
+        return
+    
+    # Motor enabled - inverted control
+    # Visual 0% = Physical MOTOR_MIN_PWM%
+    # Visual 100% = Physical 0% (duty cycle 0, no frequency visible on scope)
+    
+    visual = motor_value
+    
+    # Rule: visual 1..9 => snap to 10
+    if 0.0 < visual < 10.0:
+        visual = 10.0
+    
+    # Inverted calculation
+    # visual 0 => MOTOR_MIN_PWM%
+    # visual 100 => 0%
+    pwm_percent = MOTOR_MIN_PWM - (visual * MOTOR_MIN_PWM / 100.0)
+    
+    duty = int((pwm_percent / 100.0) * 4095)
+    duty = max(0, min(4095, duty))
+    pca.set_duty_12bit(MOTOR_CH, duty)
+
 def on_connect(client, userdata, flags, rc):
     print(f"Connected to MQTT with result code {rc}")
 
     # Subscriptions
+    client.subscribe("homeassistant/switch/motor_enable/set")
     client.subscribe("homeassistant/number/motor_pwm/set")
     client.subscribe("homeassistant/light/led0_pwm/set")
+
+    # Motor enable switch
+    discovery_motor_switch = {
+        "name": "Motor Enable",
+        "unique_id": "pca_motor_enable",
+        "command_topic": "homeassistant/switch/motor_enable/set",
+        "state_topic": "homeassistant/switch/motor_enable/state",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "availability_topic": "homeassistant/switch/motor_enable/availability",
+    }
+    client.publish("homeassistant/switch/pca_motor_enable/config", json.dumps(discovery_motor_switch), retain=True)
 
     # Motor number (slider)
     discovery_motor = {
@@ -159,34 +203,42 @@ def on_connect(client, userdata, flags, rc):
     client.publish("homeassistant/light/pca_led0_pwm/config", json.dumps(discovery_led0_blink), retain=True)
 
     # Availability
+    client.publish("homeassistant/switch/motor_enable/availability", "online", retain=True)
     client.publish("homeassistant/number/motor_pwm/availability", "online", retain=True)
     client.publish("homeassistant/light/led0_pwm/availability", "online", retain=True)
+    
+    # Initial states
+    client.publish("homeassistant/switch/motor_enable/state", "OFF", retain=True)
+    client.publish("homeassistant/number/motor_pwm/state", "0", retain=True)
 
 def on_message(client, userdata, msg):
-    global led0_brightness, led0_blink_thread
+    global led0_brightness, led0_blink_thread, motor_enabled, motor_value
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
 
     try:
-        if topic == "homeassistant/number/motor_pwm/set":
+        if topic == "homeassistant/switch/motor_enable/set":
+            motor_enabled = (payload == "ON")
+            
+            if motor_enabled:
+                # Motor enabled - update PWM based on current value
+                update_motor_pwm()
+                client.publish("homeassistant/switch/motor_enable/state", "ON")
+            else:
+                # Motor disabled - set slider to 0 and PWM to maximum (inverted = stopped)
+                motor_value = 0.0
+                update_motor_pwm()
+                client.publish("homeassistant/switch/motor_enable/state", "OFF")
+                client.publish("homeassistant/number/motor_pwm/state", "0")
+        
+        elif topic == "homeassistant/number/motor_pwm/set":
             value = float(payload)  # 0..100
             value = max(0.0, min(100.0, value))
-
-            # Rule: 1..10 => 10
-            if 0.0 < value < 10.0:
-                value = 10.0
-
-            if INVERT_MOTOR:
-                if value == 0:
-                    pwm_percent = 100.0
-                else:
-                    pwm_percent = MOTOR_MIN_PWM - (value * MOTOR_MIN_PWM / 100.0)
-            else:
-                pwm_percent = value
-
-            duty = int((pwm_percent / 100.0) * 4095)
-            duty = max(0, min(4095, duty))
-            pca.set_duty_12bit(MOTOR_CH, duty)
+            motor_value = value
+            
+            if motor_enabled:
+                update_motor_pwm()
+            
             client.publish("homeassistant/number/motor_pwm/state", str(value))
 
         elif topic == "homeassistant/light/led0_pwm/set":
