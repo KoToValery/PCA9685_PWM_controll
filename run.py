@@ -15,7 +15,7 @@ MODE1_SLEEP   = 0x10
 MODE1_AI      = 0x20
 MODE2_OUTDRV  = 0x04
 
-OSC_HZ = 25_000_000
+OSC_HZ = 26_125_000
 
 class PCA9685:
     def __init__(self, bus_num: int, address: int):
