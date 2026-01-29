@@ -15,24 +15,12 @@ MODE1_SLEEP   = 0x10
 MODE1_AI      = 0x20
 MODE2_OUTDRV  = 0x04
 
-# Номинален осцилатор на PCA9685 (typical)
-OSC_HZ_NOMINAL = 25_000_000  # 25 MHz typical internal oscillator [web:12]
-
-# ---- КАЛИБРАЦИЯ ----
-# Пример: при target=1000 Hz мериш 1045 Hz -> ratio=1.045
-# Effective oscillator = nominal * ratio
-REF_HZ = 1000.0
-MEAS_AT_HZ = 1045.0
-OSC_HZ_EFFECTIVE = int(OSC_HZ_NOMINAL * (MEAS_AT_HZ / REF_HZ))
-
+OSC_HZ = 25_000_000
 
 class PCA9685:
-    def __init__(self, bus_num: int, address: int, osc_hz: int = OSC_HZ_NOMINAL):
+    def __init__(self, bus_num: int, address: int):
         self.address = address
         self.bus = SMBus(bus_num)
-        self.osc_hz = int(osc_hz)
-
-        # Enable auto-increment; set output driver mode
         self._write8(MODE1, MODE1_AI)
         self._write8(MODE2, MODE2_OUTDRV)
         time.sleep(0.01)
@@ -50,26 +38,16 @@ class PCA9685:
         return self.bus.read_byte_data(self.address, reg)
 
     def set_pwm_freq(self, freq_hz: float):
-        # Datasheet formula: prescale = round(osc/(4096*freq)) - 1 [web:12]
-        prescale_f = (self.osc_hz / (4096.0 * float(freq_hz))) - 1.0
-        prescale = int(round(prescale_f))
+        prescale = int(round(OSC_HZ / (4096.0 * float(freq_hz)) - 1.0))
         prescale = max(3, min(255, prescale))
-
         oldmode = self._read8(MODE1)
-
-        # PRE_SCALE can only be written when SLEEP=1 [web:12]
         sleepmode = (oldmode & 0x7F) | MODE1_SLEEP
         self._write8(MODE1, sleepmode)
         time.sleep(0.005)
-
         self._write8(PRESCALE, prescale)
         time.sleep(0.005)
-
-        # Wake up
         self._write8(MODE1, oldmode)
         time.sleep(0.005)
-
-        # Restart PWM (datasheet notes RESTART usage after sleep) [web:12]
         self._write8(MODE1, oldmode | MODE1_RESTART | MODE1_AI)
         time.sleep(0.005)
 
@@ -77,7 +55,6 @@ class PCA9685:
         channel = int(channel)
         if not (0 <= channel <= 15):
             raise ValueError("channel must be 0..15")
-
         on = int(max(0, min(4095, on)))
         off = int(max(0, min(4095, off)))
 
@@ -88,7 +65,6 @@ class PCA9685:
     def set_duty_12bit(self, channel: int, duty: int):
         duty = int(max(0, min(4095, duty)))
         self.set_pwm(channel, 0, duty)
-
 
 # ---------- Read HA add-on options ----------
 with open("/data/options.json", "r") as f:
@@ -106,7 +82,7 @@ PCA_FREQ  = int(config["pca_frequency"])
 MOTOR_CH  = int(config["motor_channel"])
 LED0_CH   = int(config["led0_channel"])  # LED0 = Blink test
 
-INVERT_MOTOR  = bool(config["invert_motor"])
+INVERT_MOTOR = bool(config["invert_motor"])
 MOTOR_MIN_PWM = int(config["motor_min_pwm"])  # percent 0..100
 
 def brightness_to_12bit(brightness_0_255: int) -> int:
@@ -114,13 +90,9 @@ def brightness_to_12bit(brightness_0_255: int) -> int:
     return int((b / 255.0) * 4095)
 
 print(f"Opening I2C bus {I2C_BUS}, PCA9685 addr={hex(PCA_ADDR)}")
-print(f"Calibration: REF_HZ={REF_HZ}, MEAS_AT_HZ={MEAS_AT_HZ}, "
-      f"ratio={MEAS_AT_HZ/REF_HZ:.6f}, OSC_HZ_EFFECTIVE={OSC_HZ_EFFECTIVE}")
-
-pca = PCA9685(I2C_BUS, PCA_ADDR, osc_hz=OSC_HZ_EFFECTIVE)
+pca = PCA9685(I2C_BUS, PCA_ADDR)
 pca.set_pwm_freq(PCA_FREQ)
-print(f"PCA9685 frequency target set to {PCA_FREQ} Hz")
-
+print(f"PCA9685 frequency set to {PCA_FREQ} Hz")
 
 # ---------- MQTT ----------
 client = mqtt.Client()
@@ -158,7 +130,7 @@ def on_connect(client, userdata, flags, rc):
     client.subscribe("homeassistant/number/motor_pwm/set")
     client.subscribe("homeassistant/light/led0_pwm/set")
 
-    # Motor number (slider) discovery
+    # Motor number (slider)
     discovery_motor = {
         "name": "Motor PWM",
         "unique_id": "pca_motor_pwm",
@@ -172,7 +144,7 @@ def on_connect(client, userdata, flags, rc):
     }
     client.publish("homeassistant/number/pca_motor_pwm/config", json.dumps(discovery_motor), retain=True)
 
-    # LED0 = Blink test (effect blink/solid) discovery
+    # LED0 = Blink test (effect blink/solid)
     discovery_led0_blink = {
         "name": "LED0 Blink Test",
         "unique_id": "pca_led0_blink",
@@ -215,7 +187,6 @@ def on_message(client, userdata, msg):
             duty = int((pwm_percent / 100.0) * 4095)
             duty = max(0, min(4095, duty))
             pca.set_duty_12bit(MOTOR_CH, duty)
-
             client.publish("homeassistant/number/motor_pwm/state", str(value))
 
         elif topic == "homeassistant/light/led0_pwm/set":
