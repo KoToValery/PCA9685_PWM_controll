@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PCA9685 PWM Controller for Home Assistant
+PCA9685 PWM Controller for Home Assistant - FIXED VERSION
 Safety-critical motor control with inverted PWM topology:
   - 100% duty = Motor STOPPED (brake)
   - 90% duty  = Minimum running speed
@@ -12,6 +12,14 @@ import threading
 import signal
 import sys
 import os
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+    print("⚠ requests module not available - using options.json only")
+
 from smbus2 import SMBus
 import paho.mqtt.client as mqtt
 
@@ -79,9 +87,31 @@ class PCA9685:
 
 # ---------- Configuration loader ----------
 def load_config():
-    """Load config from options.json"""
+    if HAS_REQUESTS:
+        token = os.environ.get("SUPERVISOR_TOKEN")
+        if token:
+            try:
+                resp = requests.get(
+                    "http://supervisor/services/mqtt",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                if resp.status_code == 200:
+                    mqtt_cfg = resp.json()["data"]
+                    print("✓ MQTT config loaded from Supervisor API")
+                    with open("/data/options.json") as f:
+                        opts = json.load(f)
+                    opts.update({
+                        "mqtt_host": mqtt_cfg["host"],
+                        "mqtt_port": mqtt_cfg["port"],
+                        "mqtt_username": mqtt_cfg["username"],
+                        "mqtt_password": mqtt_cfg["password"]
+                    })
+                    return opts
+            except Exception as e:
+                print(f"⚠ Supervisor API unavailable ({e}), falling back to options.json")
+    
     with open("/data/options.json") as f:
-        print("✓ Config loaded from options.json")
+        print("✓ MQTT config loaded from options.json")
         return json.load(f)
 
 config = load_config()
@@ -105,7 +135,7 @@ if not (0 <= DEFAULT_DUTY_CYCLE <= 100):
 
 print(f"Configuration validated:")
 print(f"  - Default Duty Cycle: {DEFAULT_DUTY_CYCLE}%")
-print(f"  - PWM mapping: Visual 0%→100% (STOP), Visual 1-10%→90% (MIN), Visual 11-100%→89-0% (LINEAR)")
+print(f"  - PWM mapping: Visual 0%→100% (STOP), Visual 1-10%→90% (MIN RUN), Visual 11-100%→89-0% (LINEAR)")
 print(f"  - MQTT Broker: {MQTT_HOST}:{MQTT_PORT}")
 
 def brightness_to_12bit(brightness_0_255: int) -> int:
@@ -117,49 +147,63 @@ print(f"Opening I2C bus {I2C_BUS}, PCA9685 addr={hex(PCA_ADDR)}")
 try:
     pca = PCA9685(I2C_BUS, PCA_ADDR)
     pca.set_pwm_freq(PCA_FREQ)
-    print(f"✓ PCA9685 frequency set to {PCA_FREQ} Hz")
+    print(f"PCA9685 frequency set to {PCA_FREQ} Hz")
 except Exception as e:
     print(f"✗ Fatal: Cannot initialize PCA9685 ({e})")
     sys.exit(1)
 
-# ---------- SAFETY: Initialize motor to STOP state ----------
 print("→ Initializing motor to SAFE STOP state (100% duty)...")
 pca.set_duty_12bit(MOTOR_CH, 4095)
 time.sleep(0.1)
 
-# ---------- MQTT setup (VERSION1 API) ----------
-client = mqtt.Client()
+# ---------- MQTT setup ----------
+try:
+    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+except AttributeError:
+    client = mqtt.Client()
+
 if MQTT_USER and MQTT_PASS:
     client.username_pw_set(MQTT_USER, MQTT_PASS)
 
-# --- Global state ---
+# --- Globals ---
 motor_enabled = False
 motor_value = 0.0
 motor_lock = threading.Lock()
-
 led0_blink_thread = None
 led0_blink_running = False
 led0_blink_lock = threading.Lock()
 led0_brightness = 255
-
 led1_brightness = 0
+
+# ---------- Topic Definitions (CRITICAL FIX) ----------
+SWITCH_TOPIC_CMD = "homeassistant/switch/pca_motor_enable/set"
+SWITCH_TOPIC_STATE = "homeassistant/switch/pca_motor_enable/state"
+SWITCH_TOPIC_AVAIL = "homeassistant/switch/pca_motor_enable/availability"
+
+NUMBER_TOPIC_CMD = "homeassistant/number/pca_motor_pwm/set"
+NUMBER_TOPIC_STATE = "homeassistant/number/pca_motor_pwm/state"
+NUMBER_TOPIC_AVAIL = "homeassistant/number/pca_motor_pwm/availability"
+
+LED0_TOPIC_CMD = "homeassistant/light/pca_led0_blink/set"
+LED0_TOPIC_STATE = "homeassistant/light/pca_led0_blink/state"
+LED0_TOPIC_AVAIL = "homeassistant/light/pca_led0_blink/availability"
+
+LED1_TOPIC_CMD = "homeassistant/light/pca_led1_solid/set"
+LED1_TOPIC_STATE = "homeassistant/light/pca_led1_solid/state"
+LED1_TOPIC_AVAIL = "homeassistant/light/pca_led1_solid/availability"
 
 def led0_start_blinking():
     global led0_blink_running
     while led0_blink_running:
-        if not led0_blink_running:
-            break
+        if not led0_blink_running: break
         pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
         for _ in range(5):
-            if not led0_blink_running:
-                break
+            if not led0_blink_running: break
             time.sleep(0.1)
-        if not led0_blink_running:
-            break
+        if not led0_blink_running: break
         pca.set_duty_12bit(LED0_CH, 0)
         for _ in range(5):
-            if not led0_blink_running:
-                break
+            if not led0_blink_running: break
             time.sleep(0.1)
     pca.set_duty_12bit(LED0_CH, 0)
 
@@ -173,33 +217,24 @@ def led0_stop_blinking():
     pca.set_duty_12bit(LED0_CH, 0)
 
 def update_motor_pwm():
-    """
-    Update physical motor PWM with safety mapping:
-      - Visual 0%   → 100% PWM (STOP)
-      - Visual 1-10% → 90% PWM (MIN RUN)
-      - Visual 11-100% → (100-visual)% PWM (LINEAR)
-    """
+    """Update physical motor PWM with safety mapping"""
     global motor_enabled, motor_value
-    
-    if not motor_enabled:
-        print(f"  Motor DISABLED → PWM=100% → duty=4095 (STOP)")
-        pca.set_duty_12bit(MOTOR_CH, 4095)  # STOP
-        return
-    
-    visual = motor_value
-    
-    if visual == 0.0:
-        pwm_percent = 100.0
-    elif 0.0 < visual <= 10.0:
-        pwm_percent = 90.0
-    else:
-        pwm_percent = 100.0 - visual
-    
-    duty = int((pwm_percent / 100.0) * 4095)
-    duty = max(0, min(4095, duty))
-    
-    print(f"  Motor ENABLED: visual={visual}% → pwm={pwm_percent:.1f}% → duty={duty}")
-    pca.set_duty_12bit(MOTOR_CH, duty)
+    with motor_lock:
+        if not motor_enabled:
+            pca.set_duty_12bit(MOTOR_CH, 4095)  # 100% = STOP
+            return
+        
+        visual = motor_value
+        if visual == 0.0:
+            pwm_percent = 100.0
+        elif 0.0 < visual <= 10.0:
+            pwm_percent = 90.0  # Minimum running threshold
+        else:
+            pwm_percent = 100.0 - visual  # Linear mapping
+        
+        duty = int((pwm_percent / 100.0) * 4095)
+        duty = max(0, min(4095, duty))
+        pca.set_duty_12bit(MOTOR_CH, duty)
 
 def update_led1():
     """Update LED1 solid state"""
@@ -210,212 +245,174 @@ device_info = {
     "name": "PCA9685 PWM Controller",
     "model": "PCA9685",
     "manufacturer": "NXP Semiconductors",
-    "sw_version": "0.0.19"
+    "sw_version": "0.0.18"
 }
 
 def publish_discovery():
-    """Publish Home Assistant MQTT discovery"""
-    print("Publishing MQTT discovery messages...")
-    
-    # Motor switch
-    client.publish(
-        "homeassistant/switch/pca_motor_enable/config",
-        json.dumps({
+    """Publish HA discovery with CORRECT topic hierarchy"""
+    discoveries = [
+        # Motor Enable Switch
+        ("switch", "pca_motor_enable", {
             "name": "Motor Enable",
             "unique_id": "pca_motor_enable",
-            "command_topic": "homeassistant/switch/motor_enable/set",
-            "state_topic": "homeassistant/switch/motor_enable/state",
+            "command_topic": SWITCH_TOPIC_CMD,
+            "state_topic": SWITCH_TOPIC_STATE,
+            "availability_topic": SWITCH_TOPIC_AVAIL,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "availability_topic": "homeassistant/switch/motor_enable/availability",
             "device": device_info
         }),
-        retain=True
-    )
-    
-    # Motor speed slider
-    client.publish(
-        "homeassistant/number/pca_motor_pwm/config",
-        json.dumps({
+        # Motor Speed Slider
+        ("number", "pca_motor_pwm", {
             "name": "Motor Speed",
             "unique_id": "pca_motor_pwm",
-            "command_topic": "homeassistant/number/motor_pwm/set",
-            "state_topic": "homeassistant/number/motor_pwm/state",
+            "command_topic": NUMBER_TOPIC_CMD,
+            "state_topic": NUMBER_TOPIC_STATE,
+            "availability_topic": NUMBER_TOPIC_AVAIL,
             "min": 0,
             "max": 100,
             "step": 1,
             "unit_of_measurement": "%",
-            "availability_topic": "homeassistant/number/motor_pwm/availability",
             "device": device_info
         }),
-        retain=True
-    )
-    
-    # LED0 test light
-    client.publish(
-        "homeassistant/light/pca_led0_blink/config",
-        json.dumps({
+        # LED0 Light
+        ("light", "pca_led0_blink", {
             "name": "LED0 Test",
             "unique_id": "pca_led0_blink",
-            "command_topic": "homeassistant/light/led0_pwm/set",
-            "state_topic": "homeassistant/light/led0_pwm/state",
+            "command_topic": LED0_TOPIC_CMD,
+            "state_topic": LED0_TOPIC_STATE,
+            "availability_topic": LED0_TOPIC_AVAIL,
             "schema": "json",
             "brightness": True,
             "effect": True,
             "effect_list": ["blink", "solid"],
-            "availability_topic": "homeassistant/light/led0_pwm/availability",
             "device": device_info
         }),
-        retain=True
-    )
-    
-    # LED1 indicator
-    client.publish(
-        "homeassistant/light/pca_led1_solid/config",
-        json.dumps({
+        # LED1 Light
+        ("light", "pca_led1_solid", {
             "name": "LED1 Indicator",
             "unique_id": "pca_led1_solid",
-            "command_topic": "homeassistant/light/led1_pwm/set",
-            "state_topic": "homeassistant/light/led1_pwm/state",
+            "command_topic": LED1_TOPIC_CMD,
+            "state_topic": LED1_TOPIC_STATE,
+            "availability_topic": LED1_TOPIC_AVAIL,
             "schema": "json",
             "brightness": True,
-            "availability_topic": "homeassistant/light/led1_pwm/availability",
             "device": device_info
-        }),
-        retain=True
-    )
+        })
+    ]
     
-    # Set availability online
-    for entity in ["switch/motor_enable", "number/motor_pwm", "light/led0_pwm", "light/led1_pwm"]:
-        client.publish(f"homeassistant/{entity}/availability", "online", retain=True)
+    for component, unique_id, payload in discoveries:
+        topic = f"homeassistant/{component}/{unique_id}/config"
+        client.publish(topic, json.dumps(payload), retain=True)
+        print(f"✓ Published discovery: {topic}")
     
-    # Initial states
-    client.publish("homeassistant/switch/motor_enable/state", "OFF", retain=True)
-    client.publish("homeassistant/number/motor_pwm/state", "0", retain=True)
-    client.publish("homeassistant/light/led0_pwm/state", json.dumps({"state": "OFF"}), retain=True)
-    client.publish("homeassistant/light/led1_pwm/state", json.dumps({"state": "OFF", "brightness": 0}), retain=True)
+    # Initial availability and states
+    for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
+        client.publish(topic, "online", retain=True)
     
-    print("✓ Discovery messages published")
+    client.publish(SWITCH_TOPIC_STATE, "OFF", retain=True)
+    client.publish(NUMBER_TOPIC_STATE, "0", retain=True)
+    client.publish(LED0_TOPIC_STATE, json.dumps({"state": "OFF"}), retain=True)
+    client.publish(LED1_TOPIC_STATE, json.dumps({"state": "OFF", "brightness": 0}), retain=True)
+    print("✓ Initial states published")
 
-def on_connect(client, userdata, flags, rc):
-    """MQTT connection callback (VERSION1 API)"""
-    if rc == 0:
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    if reason_code == 0:
         print(f"✓ Connected to MQTT broker {MQTT_HOST}:{MQTT_PORT}")
-        
-        # Subscribe to command topics
-        client.subscribe("homeassistant/switch/motor_enable/set")
-        client.subscribe("homeassistant/number/motor_pwm/set")
-        client.subscribe("homeassistant/light/led0_pwm/set")
-        client.subscribe("homeassistant/light/led1_pwm/set")
-        
+        # Subscribe to CORRECT command topics
+        client.subscribe(SWITCH_TOPIC_CMD)
+        client.subscribe(NUMBER_TOPIC_CMD)
+        client.subscribe(LED0_TOPIC_CMD)
+        client.subscribe(LED1_TOPIC_CMD)
         publish_discovery()
     else:
-        print(f"✗ MQTT connection failed with code {rc}")
+        print(f"✗ MQTT connection failed with code {reason_code}")
 
 def on_message(client, userdata, msg):
-    """MQTT message callback"""
-    global led0_brightness, led0_blink_thread, led0_blink_running
-    global led1_brightness, motor_enabled, motor_value
-    
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
-    
-    print(f"← Received: {topic} = {payload}")
+    print(f"← MQTT {topic}: {payload[:60]}")
 
     try:
-        if topic == "homeassistant/switch/motor_enable/set":
+        if topic == SWITCH_TOPIC_CMD:
             new_state = (payload == "ON")
-            
             with motor_lock:
                 if new_state and not motor_enabled:
-                    # Enable motor with default speed
+                    # Включване: използваме дефолтната скорост
                     motor_value = float(DEFAULT_DUTY_CYCLE)
                     motor_enabled = True
-                    print(f"  Motor ENABLED at {motor_value}%")
                     update_motor_pwm()
-                    client.publish("homeassistant/switch/motor_enable/state", "ON", retain=True)
-                    client.publish("homeassistant/number/motor_pwm/state", str(motor_value), retain=True)
+                    client.publish(SWITCH_TOPIC_STATE, "ON", retain=True)
+                    client.publish(NUMBER_TOPIC_STATE, str(int(motor_value)), retain=True)
+                    print(f"→ Motor ENABLED at {int(motor_value)}%")
                 
                 elif not new_state and motor_enabled:
-                    # Disable motor
-                    motor_enabled = False
+                    # Изключване: задаваме 0% и спираме мотора
                     motor_value = 0.0
-                    print("  Motor DISABLED")
-                    update_motor_pwm()
-                    client.publish("homeassistant/switch/motor_enable/state", "OFF", retain=True)
-                    client.publish("homeassistant/number/motor_pwm/state", "0", retain=True)
+                    motor_enabled = False
+                    update_motor_pwm()  # КРИТИЧНО: извикваме ПРЕДИ публикуване
+                    client.publish(SWITCH_TOPIC_STATE, "OFF", retain=True)
+                    client.publish(NUMBER_TOPIC_STATE, "0", retain=True)
+                    print("→ Motor DISABLED - SAFE STOP ACTIVE (100% duty)")
 
-        elif topic == "homeassistant/number/motor_pwm/set":
+        elif topic == NUMBER_TOPIC_CMD:
             value = max(0.0, min(100.0, float(payload)))
-            print(f"  Slider changed to {value}%")
-            
             with motor_lock:
+                # 1. Винаги обновяваме стойността ПЪРВО
                 motor_value = value
                 
-                # Auto-sync switch state
-                if value == 0.0 and motor_enabled:
-                    motor_enabled = False
-                    print("  Auto-disabling motor (slider=0)")
-                    update_motor_pwm()  # Update PWM BEFORE publishing state
-                    client.publish("homeassistant/switch/motor_enable/state", "OFF", retain=True)
-                elif value > 0.0 and not motor_enabled:
-                    motor_enabled = True
-                    print("  Auto-enabling motor (slider>0)")
-                    client.publish("homeassistant/switch/motor_enable/state", "ON", retain=True)
-                    update_motor_pwm()  # Update PWM after enabling
-                elif motor_enabled:
-                    # Motor already enabled, just update PWM
-                    update_motor_pwm()
+                # 2. Определяме дали моторът трябва да е активен
+                should_be_enabled = (value > 0.0)
                 
-                client.publish("homeassistant/number/motor_pwm/state", str(value), retain=True)
+                # 3. Синхронизираме суича ако състоянието се променя
+                if should_be_enabled != motor_enabled:
+                    motor_enabled = should_be_enabled
+                    client.publish(SWITCH_TOPIC_STATE, "ON" if should_be_enabled else "OFF", retain=True)
+                    print(f"→ Motor state: {'RUNNING' if should_be_enabled else 'SAFE STOP'}")
+                
+                # 4. КРИТИЧНО: ВИНАГИ извикваме хардуерно обновяване при промяна на слайдера
+                update_motor_pwm()
+                
+                # 5. Публикуваме състоянието на слайдера
+                client.publish(NUMBER_TOPIC_STATE, str(int(value)), retain=True)
+                
+                # 6. Безопасностен дебъг
+                if value == 0.0:
+                    print("→ CRITICAL: Slider=0% → Motor commanded to SAFE STOP (100% duty/4095)")
+                else:
+                    print(f"→ Motor speed: {int(value)}%")
 
-        elif topic == "homeassistant/light/led0_pwm/set":
+        elif topic == LED0_TOPIC_CMD:
             data = json.loads(payload)
             state = data.get("state", "OFF")
             brightness = max(0, min(255, int(data.get("brightness", 255))))
             effect = data.get("effect", "blink")
 
             led0_brightness = brightness
+            led0_stop_blinking()
 
             if state == "OFF":
-                led0_stop_blinking()
-                client.publish(
-                    "homeassistant/light/led0_pwm/state",
-                    json.dumps({"state": "OFF"}),
-                    retain=True
-                )
-            else:  # ON
-                led0_stop_blinking()
+                client.publish(LED0_TOPIC_STATE, json.dumps({"state": "OFF"}), retain=True)
+                print("→ LED0 OFF")
+            else:
                 if effect == "blink":
                     with led0_blink_lock:
                         led0_blink_running = True
                         led0_blink_thread = threading.Thread(
                             target=led0_start_blinking,
-                            daemon=True
+                            daemon=True,
+                            name="LED0BlinkThread"
                         )
                         led0_blink_thread.start()
-                    client.publish(
-                        "homeassistant/light/led0_pwm/state",
-                        json.dumps({
-                            "state": "ON",
-                            "brightness": led0_brightness,
-                            "effect": "blink"
-                        }),
-                        retain=True
-                    )
-                else:  # solid
+                    state_payload = {"state": "ON", "brightness": led0_brightness, "effect": "blink"}
+                else:
                     pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
-                    client.publish(
-                        "homeassistant/light/led0_pwm/state",
-                        json.dumps({
-                            "state": "ON",
-                            "brightness": led0_brightness,
-                            "effect": "solid"
-                        }),
-                        retain=True
-                    )
+                    state_payload = {"state": "ON", "brightness": led0_brightness, "effect": "solid"}
+                
+                client.publish(LED0_TOPIC_STATE, json.dumps(state_payload), retain=True)
+                print(f"→ LED0 ON ({effect}, brightness={led0_brightness})")
 
-        elif topic == "homeassistant/light/led1_pwm/set":
+        elif topic == LED1_TOPIC_CMD:
             data = json.loads(payload)
             state = data.get("state", "OFF")
             brightness = max(0, min(255, int(data.get("brightness", 0))))
@@ -423,14 +420,12 @@ def on_message(client, userdata, msg):
             led1_brightness = brightness if state == "ON" else 0
             update_led1()
             
-            client.publish(
-                "homeassistant/light/led1_pwm/state",
-                json.dumps({
-                    "state": "ON" if state == "ON" and brightness > 0 else "OFF",
-                    "brightness": led1_brightness
-                }),
-                retain=True
-            )
+            state_payload = {
+                "state": "ON" if state == "ON" and brightness > 0 else "OFF",
+                "brightness": led1_brightness
+            }
+            client.publish(LED1_TOPIC_STATE, json.dumps(state_payload), retain=True)
+            print(f"→ LED1 {'ON' if state_payload['state']=='ON' else 'OFF'} (brightness={led1_brightness})")
 
     except Exception as e:
         print(f"✗ Error processing {topic}: {e}")
@@ -441,34 +436,33 @@ client.on_connect = on_connect
 client.on_message = on_message
 
 def safe_shutdown(signum=None, frame=None):
-    """CRITICAL: Execute safety shutdown"""
     print("\n" + "="*50)
-    print("SHUTDOWN - Executing safety sequence...")
+    print("SHUTDOWN INITIATED - Executing safety sequence...")
     print("="*50)
     
     try:
-        print("→ Motor to SAFE STOP (100% duty)...")
+        print("→ Setting motor to SAFE STOP state (100% duty)...")
         pca.set_duty_12bit(MOTOR_CH, 4095)
         time.sleep(0.2)
         
-        print("→ Stopping LEDs...")
+        print("→ Stopping LED activity...")
         led0_stop_blinking()
         pca.set_duty_12bit(LED0_CH, 0)
         pca.set_duty_12bit(LED1_CH, 0)
         
-        print("→ Setting offline...")
-        for entity in ["switch/motor_enable", "number/motor_pwm", "light/led0_pwm", "light/led1_pwm"]:
-            client.publish(f"homeassistant/{entity}/availability", "offline", retain=True)
+        print("→ Setting entities to offline...")
+        for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
+            client.publish(topic, "offline", retain=True)
         
         print("→ Disconnecting MQTT...")
         client.loop_stop()
         client.disconnect()
         
-        print("→ Closing I2C...")
+        print("→ Closing I2C bus...")
         pca.close()
         
         print("="*50)
-        print("✓ Shutdown complete")
+        print("✓ Shutdown sequence completed safely")
         print("="*50)
         
     except Exception as e:
@@ -479,40 +473,38 @@ def safe_shutdown(signum=None, frame=None):
 signal.signal(signal.SIGTERM, safe_shutdown)
 signal.signal(signal.SIGINT, safe_shutdown)
 
-# ---------- Connect with retry ----------
-print(f"Connecting to MQTT {MQTT_HOST}:{MQTT_PORT}...")
-max_retries = 10
-
-for attempt in range(1, max_retries + 1):
+# ---------- MQTT connection with retries ----------
+print(f"Connecting to MQTT broker {MQTT_HOST}:{MQTT_PORT}...")
+for attempt in range(1, 11):
     try:
         client.connect(MQTT_HOST, MQTT_PORT, 60)
         client.loop_start()
         time.sleep(2)
         if client.is_connected():
-            print("✓ MQTT connected")
+            print("✓ MQTT connected successfully")
             break
-        else:
-            raise Exception("Connection timeout")
+        raise Exception("Connection timeout")
     except Exception as e:
-        print(f"⚠ Attempt {attempt}/{max_retries} failed: {e}")
-        if attempt == max_retries:
-            print("✗ Max retries exceeded")
+        print(f"⚠ Attempt {attempt}/10 failed: {e}")
+        if attempt == 10:
+            print("✗ Max retries exceeded. Exiting with motor in SAFE STOP state.")
             safe_shutdown()
-        time.sleep(2 ** attempt)
+        time.sleep(1.5 ** (attempt - 1))
 
 print("="*50)
-print("Service running. Awaiting commands...")
+print("✅ Service running. Awaiting commands...")
+print("   Motor state: SAFE STOP (will activate on MQTT command)")
 print("="*50)
 
-# Keep-alive loop
 while True:
     time.sleep(5)
     if not client.is_connected():
-        print("⚠ MQTT disconnected - reconnecting...")
+        print("⚠ MQTT disconnected - attempting reconnect...")
         try:
             client.reconnect()
-            print("✓ Reconnected")
-            for entity in ["switch/motor_enable", "number/motor_pwm", "light/led0_pwm", "light/led1_pwm"]:
-                client.publish(f"homeassistant/{entity}/availability", "online", retain=True)
+            print("✓ MQTT reconnected")
+            for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
+                client.publish(topic, "online", retain=True)
         except Exception as e:
             print(f"✗ Reconnect failed: {e}")
+            time.sleep(10)
