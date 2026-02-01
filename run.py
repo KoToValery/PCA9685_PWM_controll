@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-PCA9685 PWM Controller for Home Assistant - RELAY COMPATIBLE VERSION
+PCA9685 PWM Controller for Home Assistant - RELAY FIXED VERSION
+ Safety-critical motor control with relay pulse support (50-100ms fixed timing)
 """
 import time
 import json
@@ -126,53 +127,25 @@ MOTOR_CH  = int(config["motor_channel"])
 LED0_CH   = int(config["led0_channel"])
 LED1_CH   = int(config.get("led1_channel", 2))
 
-# NEW: Relay configuration (can be same as LED0_CH or different)
-RELAY_CH = int(config.get("relay_channel", LED0_CH))  # По подразбиране същия канал
-RELAY_MIN_PULSE_MS = float(config.get("relay_min_pulse_ms", 50))  # Минимум 50ms
-RELAY_MAX_PULSE_MS = float(config.get("relay_max_pulse_ms", 100)) # Максимум 100ms
+# NEW: Relay configuration - fixed timing (milliseconds)
+RELAY_CH = int(config.get("relay_channel", LED0_CH))  # Default: same as LED0
+RELAY_PULSE_MS = float(config.get("relay_pulse_ms", 50))  # Fixed pulse duration (50-100ms)
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
 if not (0 <= DEFAULT_DUTY_CYCLE <= 100):
     raise ValueError(f"default_duty_cycle must be 0-100, got {DEFAULT_DUTY_CYCLE}")
 
 print(f"Configuration validated:")
-print(f"  - Default Duty Cycle: {DEFAULT_DUTY_CYCLE}%")
-print(f"  - PWM Frequency: {PCA_FREQ} Hz")
+print(f"  - Motor Channel: {MOTOR_CH}")
+print(f"  - LED0 Channel: {LED0_CH}, LED1 Channel: {LED1_CH}")
 print(f"  - Relay Channel: {RELAY_CH}")
-print(f"  - Relay Pulse: {RELAY_MIN_PULSE_MS}-{RELAY_MAX_PULSE_MS} ms (dynamic calculation)")
+print(f"  - Relay Pulse: {RELAY_PULSE_MS}ms (FIXED, independent of PWM freq)")
+print(f"  - PWM Frequency: {PCA_FREQ}Hz (only affects motor, not relay timing)")
 print(f"  - MQTT Broker: {MQTT_HOST}:{MQTT_PORT}")
 
 def brightness_to_12bit(brightness_0_255: int) -> int:
     b = int(max(0, min(255, brightness_0_255)))
     return int((b / 255.0) * 4095)
-
-# NEW: Calculate relay pulse duration based on PWM frequency
-def calculate_relay_pulse_duration():
-    """
-    Изчислява времето за задържане така, че да е:
-    1. Между RELAY_MIN_PULSE_MS и RELAY_MAX_PULSE_MS (50-100ms)
-    2. Кратно на PWM периода (цял брой цикли)
-    Това осигурява пълно зареждане на бобината на релето
-    """
-    period_ms = 1000.0 / PCA_FREQ  # период в ms (напр. 1ms при 1000Hz)
-    
-    # Минимален брой цикли за минималното време
-    min_cycles = int(RELAY_MIN_PULSE_MS / period_ms)
-    if min_cycles * period_ms < RELAY_MIN_PULSE_MS:
-        min_cycles += 1
-    
-    # Изчисляваме реалното време в ms
-    duration_ms = min_cycles * period_ms
-    
-    # Проверяваме дали не сме надвишили максимума
-    if duration_ms > RELAY_MAX_PULSE_MS:
-        # Ако е прекалено дълго, взимаме максимума (но пак закръглено на цели цикли)
-        max_cycles = int(RELAY_MAX_PULSE_MS / period_ms)
-        duration_ms = max_cycles * period_ms
-    
-    duration_s = duration_ms / 1000.0
-    print(f"  → Relay timing: {duration_ms:.1f}ms ({min_cycles} cycles @ {PCA_FREQ}Hz)")
-    return duration_s
 
 # ---------- Hardware initialization ----------
 print(f"Opening I2C bus {I2C_BUS}, PCA9685 addr={hex(PCA_ADDR)}")
@@ -209,13 +182,9 @@ led0_blink_thread = None
 led0_blink_running = False
 led0_blink_lock = threading.Lock()
 led0_brightness = 255
-led0_relay_mode = False  # NEW: Флаг за релеен режим
+led0_relay_mode = False  # True = relay pulse mode, False = normal LED blink
 
 led1_brightness = 0
-
-# NEW: Relay control globals
-relay_pulse_thread = None
-relay_pulse_lock = threading.Lock()
 
 # ---------- Topic Definitions ----------
 SWITCH_TOPIC_CMD = "homeassistant/switch/pca_motor_enable/set"
@@ -234,53 +203,54 @@ LED1_TOPIC_CMD = "homeassistant/light/pca_led1_solid/set"
 LED1_TOPIC_STATE = "homeassistant/light/pca_led1_solid/state"
 LED1_TOPIC_AVAIL = "homeassistant/light/pca_led1_solid/availability"
 
-# NEW: Dedicated relay topics (optional)
 RELAY_TOPIC_CMD = "homeassistant/switch/pca_relay/set"
 RELAY_TOPIC_STATE = "homeassistant/switch/pca_relay/state"
 
 def led0_start_blinking():
+    """Blinking thread - handles both LED and Relay modes"""
     global led0_blink_running
     
-    # Ако сме в релеен режим, използваме динамично изчислено време
     if led0_relay_mode:
-        pulse_duration = calculate_relay_pulse_duration()
-        off_duration = max(0.4, 1.0 - pulse_duration)  # Общо ~1 секунда цикъл
+        # RELAY MODE: Fixed 50-100ms ON, 500ms OFF (independent of PWM frequency)
+        pulse_duration = RELAY_PULSE_MS / 1000.0  # Convert ms to seconds
+        off_duration = 0.5  # 500ms between pulses
         
-        print(f"Starting RELAY blink mode on channel {LED0_CH}: "
-              f"{pulse_duration*1000:.0f}ms ON, {off_duration*1000:.0f}ms OFF")
+        print(f"RELAY MODE started on ch {LED0_CH}: {RELAY_PULSE_MS}ms ON / 500ms OFF")
         
         while led0_blink_running:
             if not led0_blink_running: 
                 break
             
-            # Реле: 100% duty (4095) за изчисленото време
+            # Turn ON 100% (4095) - this creates continuous HIGH output
             pca.set_duty_12bit(LED0_CH, 4095)
-            time.sleep(pulse_duration)
+            time.sleep(pulse_duration)  # Hold for fixed time (e.g. 50ms)
             
             if not led0_blink_running: 
                 break
                 
-            # Изключено
+            # Turn OFF
             pca.set_duty_12bit(LED0_CH, 0)
             time.sleep(off_duration)
+            
     else:
-        # Оригинален LED режим с яркост
+        # NORMAL LED MODE: Variable brightness, 500ms period
         while led0_blink_running:
             if not led0_blink_running: 
                 break
             pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
-            for _ in range(5):
+            for _ in range(5):  # 500ms ON
                 if not led0_blink_running: 
                     break
                 time.sleep(0.1)
             if not led0_blink_running: 
                 break
             pca.set_duty_12bit(LED0_CH, 0)
-            for _ in range(5):
+            for _ in range(5):  # 500ms OFF
                 if not led0_blink_running: 
                     break
                 time.sleep(0.1)
     
+    # Cleanup
     pca.set_duty_12bit(LED0_CH, 0)
 
 def led0_stop_blinking():
@@ -292,14 +262,13 @@ def led0_stop_blinking():
         led0_blink_thread = None
     pca.set_duty_12bit(LED0_CH, 0)
 
-# NEW: Function for single relay pulse (for external trigger)
-def trigger_relay_pulse():
-    """Единичен импулс за реле с динамично изчислено време"""
-    pulse_duration = calculate_relay_pulse_duration()
+def trigger_relay_single_pulse():
+    """Single relay pulse - non-blocking, runs in separate thread"""
+    pulse_duration = RELAY_PULSE_MS / 1000.0
     
-    print(f"Triggering relay pulse on ch {RELAY_CH}: {pulse_duration*1000:.1f}ms")
+    print(f"Relay pulse on ch {RELAY_CH}: {RELAY_PULSE_MS}ms")
     pca.set_duty_12bit(RELAY_CH, 4095)  # 100% ON
-    time.sleep(pulse_duration)
+    time.sleep(pulse_duration)          # Fixed 50-100ms
     pca.set_duty_12bit(RELAY_CH, 0)     # OFF
     print("Relay pulse complete")
 
@@ -308,7 +277,7 @@ def update_motor_pwm():
     global motor_enabled, motor_value
     
     if not motor_enabled:
-        pca.set_duty_12bit(MOTOR_CH, 4095)  # 100% = STOP
+        pca.set_duty_12bit(MOTOR_CH, 4095)  # 100% = STOP (inverted logic)
         print("  → Motor PWM: 100% duty (SAFE STOP)")
         return
     
@@ -334,7 +303,7 @@ device_info = {
     "name": "PCA9685 PWM Controller",
     "model": "PCA9685",
     "manufacturer": "NXP Semiconductors",
-    "sw_version": "0.0.21-relay"
+    "sw_version": "0.0.22-relay-fix"
 }
 
 def publish_discovery():
@@ -363,7 +332,7 @@ def publish_discovery():
             "device": device_info
         }),
         ("light", "pca_led0_blink", {
-            "name": "LED0/Relay Test",
+            "name": "LED0 Test",
             "unique_id": "pca_led0_blink",
             "command_topic": LED0_TOPIC_CMD,
             "state_topic": LED0_TOPIC_STATE,
@@ -371,7 +340,7 @@ def publish_discovery():
             "schema": "json",
             "brightness": True,
             "effect": True,
-            "effect_list": ["blink", "solid", "relay_pulse"],  # NEW: relay_pulse ефект
+            "effect_list": ["blink", "solid", "relay_pulse"],  # relay_pulse = fixed 50-100ms
             "device": device_info
         }),
         ("light", "pca_led1_solid", {
@@ -384,7 +353,6 @@ def publish_discovery():
             "brightness": True,
             "device": device_info
         }),
-        # NEW: Dedicated relay switch (optional)
         ("switch", "pca_relay", {
             "name": "Relay Pulse",
             "unique_id": "pca_relay",
@@ -403,7 +371,7 @@ def publish_discovery():
     
     print("✓ Discovery messages published")
     
-    # Initial availability and states
+    # Initial states
     for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
         client.publish(topic, "online", retain=True)
     
@@ -414,7 +382,7 @@ def publish_discovery():
     client.publish(RELAY_TOPIC_STATE, "OFF", retain=True)
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
-    """MQTT connection callback (supports both v1 and v2 API)"""
+    """MQTT connection callback"""
     rc = reason_code.value if hasattr(reason_code, 'value') else reason_code
     
     if rc == 0:
@@ -423,7 +391,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         client.subscribe(NUMBER_TOPIC_CMD)
         client.subscribe(LED0_TOPIC_CMD)
         client.subscribe(LED1_TOPIC_CMD)
-        client.subscribe(RELAY_TOPIC_CMD)  # NEW
+        client.subscribe(RELAY_TOPIC_CMD)
         publish_discovery()
     else:
         print(f"✗ MQTT connection failed with code {rc}")
@@ -432,7 +400,7 @@ def on_message(client, userdata, msg):
     """MQTT message callback"""
     global motor_enabled, motor_value
     global led0_brightness, led0_blink_thread, led0_blink_running, led1_brightness
-    global led0_relay_mode  # NEW
+    global led0_relay_mode
     
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
@@ -489,7 +457,6 @@ def on_message(client, userdata, msg):
             if state == "OFF":
                 client.publish(LED0_TOPIC_STATE, json.dumps({"state": "OFF"}), retain=True)
             else:
-                # NEW: Проверка за релеен режим
                 if effect == "relay_pulse":
                     led0_relay_mode = True
                     with led0_blink_lock:
@@ -504,10 +471,10 @@ def on_message(client, userdata, msg):
                         "brightness": 255, 
                         "effect": "relay_pulse"
                     }
-                    print(f"→ Starting RELAY pulse mode on ch {LED0_CH}")
+                    print(f"→ Auto-relay mode ON (continuous {RELAY_PULSE_MS}ms pulses)")
                 
                 elif effect == "blink":
-                    led0_relay_mode = False  # Обикновен режим
+                    led0_relay_mode = False
                     with led0_blink_lock:
                         led0_blink_running = True
                         led0_blink_thread = threading.Thread(
@@ -545,13 +512,12 @@ def on_message(client, userdata, msg):
             }
             client.publish(LED1_TOPIC_STATE, json.dumps(state_payload), retain=True)
 
-        # NEW: Dedicated relay command handling
         elif topic == RELAY_TOPIC_CMD:
             if payload == "TRIGGER":
-                # Единичен импулс в отделна нишка, за да не блокираме
-                threading.Thread(target=trigger_relay_pulse, daemon=True).start()
+                # Single pulse in separate thread (non-blocking)
+                threading.Thread(target=trigger_relay_single_pulse, daemon=True).start()
                 client.publish(RELAY_TOPIC_STATE, "ON", retain=True)
-                time.sleep(0.1)
+                time.sleep(0.05)  # Short display time for state
                 client.publish(RELAY_TOPIC_STATE, "OFF", retain=True)
             elif payload == "OFF":
                 pca.set_duty_12bit(RELAY_CH, 0)
@@ -579,7 +545,7 @@ def safe_shutdown(signum=None, frame=None):
         led0_stop_blinking()
         pca.set_duty_12bit(LED0_CH, 0)
         pca.set_duty_12bit(LED1_CH, 0)
-        pca.set_duty_12bit(RELAY_CH, 0)  # NEW
+        pca.set_duty_12bit(RELAY_CH, 0)
         
         print("→ Setting offline...")
         for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
