@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir \
     smbus2 \
+    requests \
     paho-mqtt
 
 COPY run.py /
