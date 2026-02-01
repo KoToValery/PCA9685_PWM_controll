@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PCA9685 PWM Controller for Home Assistant - FIXED VERSION
+PCA9685 PWM Controller for Home Assistant - FIXED VERSION (with global declarations)
 Safety-critical motor control with inverted PWM topology:
   - 100% duty = Motor STOPPED (brake)
   - 90% duty  = Minimum running speed
@@ -165,7 +165,7 @@ except AttributeError:
 if MQTT_USER and MQTT_PASS:
     client.username_pw_set(MQTT_USER, MQTT_PASS)
 
-# --- Globals ---
+# --- Globals (MUST be declared global in functions that modify them) ---
 motor_enabled = False
 motor_value = 0.0
 motor_lock = threading.Lock()
@@ -175,7 +175,7 @@ led0_blink_lock = threading.Lock()
 led0_brightness = 255
 led1_brightness = 0
 
-# ---------- Topic Definitions (CRITICAL FIX) ----------
+# ---------- Topic Definitions ----------
 SWITCH_TOPIC_CMD = "homeassistant/switch/pca_motor_enable/set"
 SWITCH_TOPIC_STATE = "homeassistant/switch/pca_motor_enable/state"
 SWITCH_TOPIC_AVAIL = "homeassistant/switch/pca_motor_enable/availability"
@@ -193,7 +193,7 @@ LED1_TOPIC_STATE = "homeassistant/light/pca_led1_solid/state"
 LED1_TOPIC_AVAIL = "homeassistant/light/pca_led1_solid/availability"
 
 def led0_start_blinking():
-    global led0_blink_running
+    global led0_blink_running, led0_brightness
     while led0_blink_running:
         if not led0_blink_running: break
         pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
@@ -238,6 +238,7 @@ def update_motor_pwm():
 
 def update_led1():
     """Update LED1 solid state"""
+    global led1_brightness
     pca.set_duty_12bit(LED1_CH, brightness_to_12bit(led1_brightness))
 
 device_info = {
@@ -329,6 +330,9 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         print(f"✗ MQTT connection failed with code {reason_code}")
 
 def on_message(client, userdata, msg):
+    # 🔑 КРИТИЧНО: Декларираме всички променливи, които МОДИФИЦИРАМЕ, като global
+    global motor_enabled, motor_value, led0_brightness, led0_blink_running, led0_blink_thread, led1_brightness
+    
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
     print(f"← MQTT {topic}: {payload[:60]}")
