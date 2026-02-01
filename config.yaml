@@ -1,5 +1,5 @@
 name: "PCA9685 PWM Controller"
-version: "0.0.22"
+version: "0.0.23"
 slug: "pca9685_pwm"
 description: "Control PCA9685 PWM board via MQTT for motors and LEDs"
 init: false
