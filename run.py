@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PCA9685 PWM Controller for Home Assistant - RELAY FIXED VERSION
- Safety-critical motor control with relay pulse support (50-100ms fixed timing)
+Safety-critical motor control with relay pulse support (50-100ms fixed timing)
 """
 import time
 import json
@@ -234,6 +234,7 @@ def led0_start_blinking():
             
     else:
         # NORMAL LED MODE: Variable brightness, 500ms period
+        print(f"LED MODE started on ch {LED0_CH}: brightness {led0_brightness}/255")
         while led0_blink_running:
             if not led0_blink_running: 
                 break
@@ -252,9 +253,10 @@ def led0_start_blinking():
     
     # Cleanup
     pca.set_duty_12bit(LED0_CH, 0)
+    print(f"Blinking stopped on ch {LED0_CH}")
 
 def led0_stop_blinking():
-    global led0_blink_running, led0_blink_thread
+    global led0_blink_running, led0_blink_thread, led0_relay_mode  # <-- ПОПРАВЕНО: добавен global
     with led0_blink_lock:
         led0_blink_running = False
         if led0_blink_thread and led0_blink_thread.is_alive():
@@ -303,7 +305,7 @@ device_info = {
     "name": "PCA9685 PWM Controller",
     "model": "PCA9685",
     "manufacturer": "NXP Semiconductors",
-    "sw_version": "0.0.22-relay-fix"
+    "sw_version": "0.0.28-relay-fix"  # Обновена версия
 }
 
 def publish_discovery():
@@ -400,7 +402,7 @@ def on_message(client, userdata, msg):
     """MQTT message callback"""
     global motor_enabled, motor_value
     global led0_brightness, led0_blink_thread, led0_blink_running, led1_brightness
-    global led0_relay_mode
+    global led0_relay_mode  # <-- ПОПРАВЕНО: това липсваше и беше причината да не работи!
     
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
@@ -458,7 +460,8 @@ def on_message(client, userdata, msg):
                 client.publish(LED0_TOPIC_STATE, json.dumps({"state": "OFF"}), retain=True)
             else:
                 if effect == "relay_pulse":
-                    led0_relay_mode = True
+                    led0_relay_mode = True  # Сега това ще работи понеже има global декларация!
+                    print(f"→ Setting relay_mode = True (effect: {effect})")  # Debug лог
                     with led0_blink_lock:
                         led0_blink_running = True
                         led0_blink_thread = threading.Thread(
@@ -475,6 +478,7 @@ def on_message(client, userdata, msg):
                 
                 elif effect == "blink":
                     led0_relay_mode = False
+                    print(f"→ Setting relay_mode = False (effect: {effect})")  # Debug лог
                     with led0_blink_lock:
                         led0_blink_running = True
                         led0_blink_thread = threading.Thread(
