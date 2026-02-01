@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-PCA9685 PWM Controller for Home Assistant - RELAY FIXED VERSION
-Safety-critical motor control with relay pulse support (50-100ms fixed timing)
+PCA9685 PWM Controller for Home Assistant - BRIGHTNESS BUG FIX
 """
 import time
 import json
@@ -128,8 +127,8 @@ LED0_CH   = int(config["led0_channel"])
 LED1_CH   = int(config.get("led1_channel", 2))
 
 # NEW: Relay configuration - fixed timing (milliseconds)
-RELAY_CH = int(config.get("relay_channel", LED0_CH))  # Default: same as LED0
-RELAY_PULSE_MS = float(config.get("relay_pulse_ms", 50))  # Fixed pulse duration (50-100ms)
+RELAY_CH = int(config.get("relay_channel", LED0_CH))
+RELAY_PULSE_MS = float(config.get("relay_pulse_ms", 50))
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
 if not (0 <= DEFAULT_DUTY_CYCLE <= 100):
@@ -139,8 +138,8 @@ print(f"Configuration validated:")
 print(f"  - Motor Channel: {MOTOR_CH}")
 print(f"  - LED0 Channel: {LED0_CH}, LED1 Channel: {LED1_CH}")
 print(f"  - Relay Channel: {RELAY_CH}")
-print(f"  - Relay Pulse: {RELAY_PULSE_MS}ms (FIXED, independent of PWM freq)")
-print(f"  - PWM Frequency: {PCA_FREQ}Hz (only affects motor, not relay timing)")
+print(f"  - Relay Pulse: {RELAY_PULSE_MS}ms")
+print(f"  - ⚠️ WARNING: If LED1 and Relay share channel {RELAY_CH}, they will conflict!")
 print(f"  - MQTT Broker: {MQTT_HOST}:{MQTT_PORT}")
 
 def brightness_to_12bit(brightness_0_255: int) -> int:
@@ -182,9 +181,9 @@ led0_blink_thread = None
 led0_blink_running = False
 led0_blink_lock = threading.Lock()
 led0_brightness = 255
-led0_relay_mode = False  # True = relay pulse mode, False = normal LED blink
+led0_relay_mode = False
 
-led1_brightness = 0
+led1_brightness = 255  # Default to full brightness
 
 # ---------- Topic Definitions ----------
 SWITCH_TOPIC_CMD = "homeassistant/switch/pca_motor_enable/set"
@@ -211,52 +210,47 @@ def led0_start_blinking():
     global led0_blink_running
     
     if led0_relay_mode:
-        # RELAY MODE: Fixed 50-100ms ON, 500ms OFF (independent of PWM frequency)
-        pulse_duration = RELAY_PULSE_MS / 1000.0  # Convert ms to seconds
-        off_duration = 0.5  # 500ms between pulses
+        pulse_duration = RELAY_PULSE_MS / 1000.0
+        off_duration = 0.5
         
-        print(f"RELAY MODE started on ch {LED0_CH}: {RELAY_PULSE_MS}ms ON / 500ms OFF")
+        print(f"RELAY MODE on ch {LED0_CH}: {RELAY_PULSE_MS}ms ON / 500ms OFF")
         
         while led0_blink_running:
             if not led0_blink_running: 
                 break
             
-            # Turn ON 100% (4095) - this creates continuous HIGH output
             pca.set_duty_12bit(LED0_CH, 4095)
-            time.sleep(pulse_duration)  # Hold for fixed time (e.g. 50ms)
+            time.sleep(pulse_duration)
             
             if not led0_blink_running: 
                 break
                 
-            # Turn OFF
             pca.set_duty_12bit(LED0_CH, 0)
             time.sleep(off_duration)
             
     else:
-        # NORMAL LED MODE: Variable brightness, 500ms period
-        print(f"LED MODE started on ch {LED0_CH}: brightness {led0_brightness}/255")
+        print(f"LED MODE on ch {LED0_CH}: brightness {led0_brightness}")
         while led0_blink_running:
             if not led0_blink_running: 
                 break
             pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
-            for _ in range(5):  # 500ms ON
+            for _ in range(5):
                 if not led0_blink_running: 
                     break
                 time.sleep(0.1)
             if not led0_blink_running: 
                 break
             pca.set_duty_12bit(LED0_CH, 0)
-            for _ in range(5):  # 500ms OFF
+            for _ in range(5):
                 if not led0_blink_running: 
                     break
                 time.sleep(0.1)
     
-    # Cleanup
     pca.set_duty_12bit(LED0_CH, 0)
     print(f"Blinking stopped on ch {LED0_CH}")
 
 def led0_stop_blinking():
-    global led0_blink_running, led0_blink_thread, led0_relay_mode  # <-- ПОПРАВЕНО: добавен global
+    global led0_blink_running, led0_blink_thread, led0_relay_mode
     with led0_blink_lock:
         led0_blink_running = False
         if led0_blink_thread and led0_blink_thread.is_alive():
@@ -265,13 +259,13 @@ def led0_stop_blinking():
     pca.set_duty_12bit(LED0_CH, 0)
 
 def trigger_relay_single_pulse():
-    """Single relay pulse - non-blocking, runs in separate thread"""
+    """Single relay pulse - non-blocking"""
     pulse_duration = RELAY_PULSE_MS / 1000.0
     
     print(f"Relay pulse on ch {RELAY_CH}: {RELAY_PULSE_MS}ms")
-    pca.set_duty_12bit(RELAY_CH, 4095)  # 100% ON
-    time.sleep(pulse_duration)          # Fixed 50-100ms
-    pca.set_duty_12bit(RELAY_CH, 0)     # OFF
+    pca.set_duty_12bit(RELAY_CH, 4095)
+    time.sleep(pulse_duration)
+    pca.set_duty_12bit(RELAY_CH, 0)
     print("Relay pulse complete")
 
 def update_motor_pwm():
@@ -279,7 +273,7 @@ def update_motor_pwm():
     global motor_enabled, motor_value
     
     if not motor_enabled:
-        pca.set_duty_12bit(MOTOR_CH, 4095)  # 100% = STOP (inverted logic)
+        pca.set_duty_12bit(MOTOR_CH, 4095)
         print("  → Motor PWM: 100% duty (SAFE STOP)")
         return
     
@@ -305,7 +299,7 @@ device_info = {
     "name": "PCA9685 PWM Controller",
     "model": "PCA9685",
     "manufacturer": "NXP Semiconductors",
-    "sw_version": "0.0.28-relay-fix"  # Обновена версия
+    "sw_version": "0.0.29-brightness-fix"
 }
 
 def publish_discovery():
@@ -334,7 +328,7 @@ def publish_discovery():
             "device": device_info
         }),
         ("light", "pca_led0_blink", {
-            "name": "LED0 Test",
+            "name": "LED0 Blinking",
             "unique_id": "pca_led0_blink",
             "command_topic": LED0_TOPIC_CMD,
             "state_topic": LED0_TOPIC_STATE,
@@ -342,11 +336,11 @@ def publish_discovery():
             "schema": "json",
             "brightness": True,
             "effect": True,
-            "effect_list": ["blink", "solid", "relay_pulse"],  # relay_pulse = fixed 50-100ms
+            "effect_list": ["blink", "solid", "relay_pulse"],
             "device": device_info
         }),
         ("light", "pca_led1_solid", {
-            "name": "LED1 Indicator",
+            "name": "LED1 On/OFF",
             "unique_id": "pca_led1_solid",
             "command_topic": LED1_TOPIC_CMD,
             "state_topic": LED1_TOPIC_STATE,
@@ -356,7 +350,7 @@ def publish_discovery():
             "device": device_info
         }),
         ("switch", "pca_relay", {
-            "name": "Relay Pulse",
+            "name": "Relay Pulse (Momentary)",
             "unique_id": "pca_relay",
             "command_topic": RELAY_TOPIC_CMD,
             "state_topic": RELAY_TOPIC_STATE,
@@ -373,7 +367,6 @@ def publish_discovery():
     
     print("✓ Discovery messages published")
     
-    # Initial states
     for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
         client.publish(topic, "online", retain=True)
     
@@ -402,7 +395,7 @@ def on_message(client, userdata, msg):
     """MQTT message callback"""
     global motor_enabled, motor_value
     global led0_brightness, led0_blink_thread, led0_blink_running, led1_brightness
-    global led0_relay_mode  # <-- ПОПРАВЕНО: това липсваше и беше причината да не работи!
+    global led0_relay_mode
     
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
@@ -445,7 +438,7 @@ def on_message(client, userdata, msg):
                 client.publish(NUMBER_TOPIC_STATE, str(int(value)), retain=True)
                 
                 if value == 0.0:
-                    print("→ CRITICAL: Slider=0 → SAFE STOP commanded")
+                    print("→ CRITICAL: Slider=0 → SAFE STOP")
 
         elif topic == LED0_TOPIC_CMD:
             data = json.loads(payload)
@@ -460,8 +453,7 @@ def on_message(client, userdata, msg):
                 client.publish(LED0_TOPIC_STATE, json.dumps({"state": "OFF"}), retain=True)
             else:
                 if effect == "relay_pulse":
-                    led0_relay_mode = True  # Сега това ще работи понеже има global декларация!
-                    print(f"→ Setting relay_mode = True (effect: {effect})")  # Debug лог
+                    led0_relay_mode = True
                     with led0_blink_lock:
                         led0_blink_running = True
                         led0_blink_thread = threading.Thread(
@@ -469,16 +461,11 @@ def on_message(client, userdata, msg):
                             daemon=True
                         )
                         led0_blink_thread.start()
-                    state_payload = {
-                        "state": "ON", 
-                        "brightness": 255, 
-                        "effect": "relay_pulse"
-                    }
-                    print(f"→ Auto-relay mode ON (continuous {RELAY_PULSE_MS}ms pulses)")
+                    state_payload = {"state": "ON", "brightness": 255, "effect": "relay_pulse"}
+                    print(f"→ Auto-relay mode ON ({RELAY_PULSE_MS}ms pulses)")
                 
                 elif effect == "blink":
                     led0_relay_mode = False
-                    print(f"→ Setting relay_mode = False (effect: {effect})")  # Debug лог
                     with led0_blink_lock:
                         led0_blink_running = True
                         led0_blink_thread = threading.Thread(
@@ -486,43 +473,52 @@ def on_message(client, userdata, msg):
                             daemon=True
                         )
                         led0_blink_thread.start()
-                    state_payload = {
-                        "state": "ON", 
-                        "brightness": led0_brightness, 
-                        "effect": "blink"
-                    }
+                    state_payload = {"state": "ON", "brightness": led0_brightness, "effect": "blink"}
                 else:  # solid
                     led0_relay_mode = False
                     pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
-                    state_payload = {
-                        "state": "ON", 
-                        "brightness": led0_brightness, 
-                        "effect": "solid"
-                    }
+                    state_payload = {"state": "ON", "brightness": led0_brightness, "effect": "solid"}
                 
                 client.publish(LED0_TOPIC_STATE, json.dumps(state_payload), retain=True)
 
+        # ========== ПОПРАВЕНА СЕКЦИЯ ЗА LED1 ==========
         elif topic == LED1_TOPIC_CMD:
             data = json.loads(payload)
             state = data.get("state", "OFF")
-            brightness = max(0, min(255, int(data.get("brightness", 0))))
+            
+            # ПОПРАВКА: Ако няма brightness в JSON, но state е ON -> използваме 255 (пълна яркост)
+            # или запазената стойност ако е > 0
+            if "brightness" in data:
+                brightness = max(0, min(255, int(data["brightness"])))
+            else:
+                # Ако липсва brightness ключ в JSON
+                if state == "ON":
+                    brightness = led1_brightness if led1_brightness > 0 else 255
+                    print(f"  → No brightness in JSON, using {brightness}")
+                else:
+                    brightness = 0
             
             led1_brightness = brightness if state == "ON" else 0
             update_led1()
             
             state_payload = {
-                "state": "ON" if state == "ON" and brightness > 0 else "OFF",
+                "state": "ON" if (state == "ON" and led1_brightness > 0) else "OFF",
                 "brightness": led1_brightness
             }
             client.publish(LED1_TOPIC_STATE, json.dumps(state_payload), retain=True)
+            print(f"→ LED1 (ch {LED1_CH}): {'ON' if state=='ON' else 'OFF'} brightness={led1_brightness}")
+
+        # ==============================================
 
         elif topic == RELAY_TOPIC_CMD:
             if payload == "TRIGGER":
-                # Single pulse in separate thread (non-blocking)
+                # Стартираме в отделна нишка за да не блокираме MQTT
                 threading.Thread(target=trigger_relay_single_pulse, daemon=True).start()
+                # Switch-ът се връща в OFF веднага - това е нормално за momentary button
                 client.publish(RELAY_TOPIC_STATE, "ON", retain=True)
-                time.sleep(0.05)  # Short display time for state
+                time.sleep(0.05)
                 client.publish(RELAY_TOPIC_STATE, "OFF", retain=True)
+                print(f"→ Relay TRIGGER sent (ch {RELAY_CH})")
             elif payload == "OFF":
                 pca.set_duty_12bit(RELAY_CH, 0)
                 client.publish(RELAY_TOPIC_STATE, "OFF", retain=True)
