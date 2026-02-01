@@ -182,6 +182,7 @@ def update_motor_pwm():
     global motor_enabled, motor_value
     
     if not motor_enabled:
+        print(f"  Motor DISABLED → PWM=100% → duty=4095 (STOP)")
         pca.set_duty_12bit(MOTOR_CH, 4095)  # STOP
         return
     
@@ -197,7 +198,7 @@ def update_motor_pwm():
     duty = int((pwm_percent / 100.0) * 4095)
     duty = max(0, min(4095, duty))
     
-    print(f"  Motor: visual={visual}% → pwm={pwm_percent:.1f}% → duty={duty}")
+    print(f"  Motor ENABLED: visual={visual}% → pwm={pwm_percent:.1f}% → duty={duty}")
     pca.set_duty_12bit(MOTOR_CH, duty)
 
 def update_led1():
@@ -349,18 +350,21 @@ def on_message(client, userdata, msg):
             print(f"  Slider changed to {value}%")
             
             with motor_lock:
+                motor_value = value
+                
                 # Auto-sync switch state
                 if value == 0.0 and motor_enabled:
                     motor_enabled = False
                     print("  Auto-disabling motor (slider=0)")
+                    update_motor_pwm()  # Update PWM BEFORE publishing state
                     client.publish("homeassistant/switch/motor_enable/state", "OFF", retain=True)
                 elif value > 0.0 and not motor_enabled:
                     motor_enabled = True
                     print("  Auto-enabling motor (slider>0)")
                     client.publish("homeassistant/switch/motor_enable/state", "ON", retain=True)
-                
-                motor_value = value
-                if motor_enabled:
+                    update_motor_pwm()  # Update PWM after enabling
+                elif motor_enabled:
+                    # Motor already enabled, just update PWM
                     update_motor_pwm()
                 
                 client.publish("homeassistant/number/motor_pwm/state", str(value), retain=True)
