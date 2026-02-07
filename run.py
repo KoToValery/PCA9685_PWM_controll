@@ -1,36 +1,42 @@
 #!/usr/bin/env python3
 """
-PCA9685 PWM Controller for Home Assistant - BRIGHTNESS BUG FIX
+PCA9685 PWM Controller for Home Assistant
 """
-import time
 import json
-import threading
+import logging
+import os
 import signal
 import sys
-import os
+import threading
+import time
 
 try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
-    print("⚠ requests module not available - using options.json only")
 
 from smbus2 import SMBus
 import paho.mqtt.client as mqtt
 
-# ---------- PCA9685 low-level driver via smbus2 ----------
-MODE1      = 0x00
-MODE2      = 0x01
-PRESCALE   = 0xFE
-LED0_ON_L  = 0x06
+logger = logging.getLogger("pca9685_pwm")
+_handler = logging.StreamHandler(stream=sys.stdout)
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
+
+MODE1 = 0x00
+MODE2 = 0x01
+PRESCALE = 0xFE
+LED0_ON_L = 0x06
 
 MODE1_RESTART = 0x80
-MODE1_SLEEP   = 0x10
-MODE1_AI      = 0x20
-MODE2_OUTDRV  = 0x04
+MODE1_SLEEP = 0x10
+MODE1_AI = 0x20
+MODE2_OUTDRV = 0x04
 
 OSC_HZ = 25_000_000
+
 
 class PCA9685:
     def __init__(self, bus_num: int, address: int):
@@ -81,7 +87,20 @@ class PCA9685:
         duty = int(max(0, min(4095, duty)))
         self.set_pwm(channel, 0, duty)
 
-# ---------- Configuration loader ----------
+
+CH_PWM1 = 0
+CH_HEATER_1 = 1
+CH_HEATER_2 = 2
+CH_HEATER_3 = 3
+CH_HEATER_4 = 4
+CH_FAN_1 = 5
+CH_FAN_2 = 6
+CH_STEPPER_DIR = 7
+CH_STEPPER_ENA = 8
+CH_PU = 9
+CH_SYS_LED = 15
+
+
 def load_config():
     if HAS_REQUESTS:
         token = os.environ.get("SUPERVISOR_TOKEN")
@@ -90,516 +109,651 @@ def load_config():
                 resp = requests.get(
                     "http://supervisor/services/mqtt",
                     headers={"Authorization": f"Bearer {token}"},
-                    timeout=5
+                    timeout=5,
                 )
                 if resp.status_code == 200:
                     mqtt_cfg = resp.json()["data"]
-                    print("✓ MQTT config loaded from Supervisor API")
                     with open("/data/options.json") as f:
                         opts = json.load(f)
-                    opts.update({
-                        "mqtt_host": mqtt_cfg["host"],
-                        "mqtt_port": mqtt_cfg["port"],
-                        "mqtt_username": mqtt_cfg["username"],
-                        "mqtt_password": mqtt_cfg["password"]
-                    })
+                    opts.update(
+                        {
+                            "mqtt_host": mqtt_cfg["host"],
+                            "mqtt_port": mqtt_cfg["port"],
+                            "mqtt_username": mqtt_cfg["username"],
+                            "mqtt_password": mqtt_cfg["password"],
+                        }
+                    )
                     return opts
-            except Exception as e:
-                print(f"⚠ Supervisor API unavailable ({e}), falling back to options.json")
-    
+            except Exception:
+                pass
+
     with open("/data/options.json") as f:
-        print("✓ MQTT config loaded from options.json")
         return json.load(f)
+
 
 config = load_config()
 
 MQTT_HOST = config["mqtt_host"]
-MQTT_PORT = config["mqtt_port"]
+MQTT_PORT = int(config["mqtt_port"])
 MQTT_USER = config.get("mqtt_username") or None
 MQTT_PASS = config.get("mqtt_password") or None
 
-I2C_BUS   = int(config.get("i2c_bus", 1))
-PCA_ADDR  = int(config["pca_address"], 16)
-PCA_FREQ  = int(config["pca_frequency"])
-
-MOTOR_CH  = int(config["motor_channel"])
-LED0_CH   = int(config["led0_channel"])
-LED1_CH   = int(config.get("led1_channel", 2))
-
-# NEW: Relay configuration - fixed timing (milliseconds)
-RELAY_CH = int(config.get("relay_channel", LED0_CH))
-RELAY_PULSE_MS = float(config.get("relay_pulse_ms", 50))
+I2C_BUS = int(config.get("i2c_bus", 1))
+PCA_ADDR = int(config["pca_address"], 16)
+PCA_FREQ = int(config.get("pca_frequency", 1000))
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
-if not (0 <= DEFAULT_DUTY_CYCLE <= 100):
-    raise ValueError(f"default_duty_cycle must be 0-100, got {DEFAULT_DUTY_CYCLE}")
+DEFAULT_DUTY_CYCLE = max(0, min(100, DEFAULT_DUTY_CYCLE))
 
-print(f"Configuration validated:")
-print(f"  - Motor Channel: {MOTOR_CH}")
-print(f"  - LED0 Channel: {LED0_CH}, LED1 Channel: {LED1_CH}")
-print(f"  - Relay Channel: {RELAY_CH}")
-print(f"  - Relay Pulse: {RELAY_PULSE_MS}ms")
-print(f"  - ⚠️ WARNING: If LED1 and Relay share channel {RELAY_CH}, they will conflict!")
-print(f"  - MQTT Broker: {MQTT_HOST}:{MQTT_PORT}")
+PU_DEFAULT_HZ = float(config.get("pu_default_hz", 10.0))
+PU_DEFAULT_HZ = max(0.0, PU_DEFAULT_HZ)
 
-def brightness_to_12bit(brightness_0_255: int) -> int:
-    b = int(max(0, min(255, brightness_0_255)))
-    return int((b / 255.0) * 4095)
+AVAIL_TOPIC = "homeassistant/pca9685_pwm/availability"
 
-# ---------- Hardware initialization ----------
-print(f"Opening I2C bus {I2C_BUS}, PCA9685 addr={hex(PCA_ADDR)}")
+
+def _topic(component: str, unique_id: str, suffix: str) -> str:
+    return f"homeassistant/{component}/{unique_id}/{suffix}"
+
+
+TOPIC_PWM1_ENABLE_CMD = _topic("switch", "pca_pwm1_enable", "set")
+TOPIC_PWM1_ENABLE_STATE = _topic("switch", "pca_pwm1_enable", "state")
+
+TOPIC_PWM1_DUTY_CMD = _topic("number", "pca_pwm1_duty", "set")
+TOPIC_PWM1_DUTY_STATE = _topic("number", "pca_pwm1_duty", "state")
+
+TOPIC_HEATER_1_CMD = _topic("switch", "pca_heater_1", "set")
+TOPIC_HEATER_1_STATE = _topic("switch", "pca_heater_1", "state")
+TOPIC_HEATER_2_CMD = _topic("switch", "pca_heater_2", "set")
+TOPIC_HEATER_2_STATE = _topic("switch", "pca_heater_2", "state")
+TOPIC_HEATER_3_CMD = _topic("switch", "pca_heater_3", "set")
+TOPIC_HEATER_3_STATE = _topic("switch", "pca_heater_3", "state")
+TOPIC_HEATER_4_CMD = _topic("switch", "pca_heater_4", "set")
+TOPIC_HEATER_4_STATE = _topic("switch", "pca_heater_4", "state")
+
+TOPIC_FAN_1_CMD = _topic("switch", "pca_fan_1", "set")
+TOPIC_FAN_1_STATE = _topic("switch", "pca_fan_1", "state")
+TOPIC_FAN_2_CMD = _topic("switch", "pca_fan_2", "set")
+TOPIC_FAN_2_STATE = _topic("switch", "pca_fan_2", "state")
+
+TOPIC_STEPPER_DIR_CMD = _topic("select", "pca_stepper_dir", "set")
+TOPIC_STEPPER_DIR_STATE = _topic("select", "pca_stepper_dir", "state")
+
+TOPIC_STEPPER_ENA_CMD = _topic("switch", "pca_stepper_ena", "set")
+TOPIC_STEPPER_ENA_STATE = _topic("switch", "pca_stepper_ena", "state")
+
+TOPIC_PU_ENABLE_CMD = _topic("switch", "pca_pu_enable", "set")
+TOPIC_PU_ENABLE_STATE = _topic("switch", "pca_pu_enable", "state")
+
+TOPIC_PU_FREQ_CMD = _topic("number", "pca_pu_freq_hz", "set")
+TOPIC_PU_FREQ_STATE = _topic("number", "pca_pu_freq_hz", "state")
+
+
+def validate_fixed_mapping():
+    channels = [
+        CH_PWM1,
+        CH_HEATER_1,
+        CH_HEATER_2,
+        CH_HEATER_3,
+        CH_HEATER_4,
+        CH_FAN_1,
+        CH_FAN_2,
+        CH_STEPPER_DIR,
+        CH_STEPPER_ENA,
+        CH_PU,
+        CH_SYS_LED,
+    ]
+    for ch in channels:
+        if not (0 <= ch <= 15):
+            raise ValueError(f"Invalid channel {ch}; expected 0..15")
+    if len(set(channels)) != len(channels):
+        raise ValueError("Fixed channel mapping contains duplicates")
+
+
+validate_fixed_mapping()
+logger.info("Fixed channels: PWM1=0, Heaters=1-4, Fans=5-6, DIR=7, ENA=8, PU=9, SYS_LED=15")
+
+
+def channel_on(channel: int):
+    pca.set_duty_12bit(channel, 4095)
+
+
+def channel_off(channel: int):
+    pca.set_duty_12bit(channel, 0)
+
+
+logger.info("Opening I2C bus %s, PCA9685 addr=%s", I2C_BUS, hex(PCA_ADDR))
 try:
     pca = PCA9685(I2C_BUS, PCA_ADDR)
     pca.set_pwm_freq(PCA_FREQ)
-    print(f"PCA9685 frequency set to {PCA_FREQ} Hz")
+    logger.info("PCA9685 global PWM frequency set to %s Hz", PCA_FREQ)
 except Exception as e:
-    print(f"✗ Fatal: Cannot initialize PCA9685 ({e})")
+    logger.error("Fatal: Cannot initialize PCA9685 (%s)", e)
     sys.exit(1)
 
-print("→ Initializing motor to SAFE STOP state (100% duty)...")
-pca.set_duty_12bit(MOTOR_CH, 4095)
-time.sleep(0.1)
 
-# ---------- MQTT setup ----------
-try:
-    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
-    MQTT_V2 = True
-except (AttributeError, TypeError):
-    client = mqtt.Client()
-    MQTT_V2 = False
-    print("⚠ Using MQTT v1 API (paho-mqtt < 2.0)")
+pwm1_enabled = False
+pwm1_value = 0.0
+pwm1_lock = threading.Lock()
 
-if MQTT_USER and MQTT_PASS:
-    client.username_pw_set(MQTT_USER, MQTT_PASS)
+heater_1 = False
+heater_2 = False
+heater_3 = False
+heater_4 = False
+fan_1 = False
+fan_2 = False
 
-# --- Globals ---
-motor_enabled = False
-motor_value = 0.0
-motor_lock = threading.Lock()
+stepper_dir = "CW"
+stepper_ena = False
 
-led0_blink_thread = None
-led0_blink_running = False
-led0_blink_lock = threading.Lock()
-led0_brightness = 255
-led0_relay_mode = False
+pu_enabled = False
+pu_freq_hz = float(PU_DEFAULT_HZ)
+pu_lock = threading.Lock()
+pu_thread = None
+pu_running = False
 
-led1_brightness = 255  # Default to full brightness
+sys_led_thread = None
+sys_led_running = False
+sys_led_lock = threading.Lock()
 
-# ---------- Topic Definitions ----------
-SWITCH_TOPIC_CMD = "homeassistant/switch/pca_motor_enable/set"
-SWITCH_TOPIC_STATE = "homeassistant/switch/pca_motor_enable/state"
-SWITCH_TOPIC_AVAIL = "homeassistant/switch/pca_motor_enable/availability"
 
-NUMBER_TOPIC_CMD = "homeassistant/number/pca_motor_pwm/set"
-NUMBER_TOPIC_STATE = "homeassistant/number/pca_motor_pwm/state"
-NUMBER_TOPIC_AVAIL = "homeassistant/number/pca_motor_pwm/availability"
+def update_pwm1_output_locked():
+    global pwm1_enabled, pwm1_value
 
-LED0_TOPIC_CMD = "homeassistant/light/pca_led0_blink/set"
-LED0_TOPIC_STATE = "homeassistant/light/pca_led0_blink/state"
-LED0_TOPIC_AVAIL = "homeassistant/light/pca_led0_blink/availability"
-
-LED1_TOPIC_CMD = "homeassistant/light/pca_led1_solid/set"
-LED1_TOPIC_STATE = "homeassistant/light/pca_led1_solid/state"
-LED1_TOPIC_AVAIL = "homeassistant/light/pca_led1_solid/availability"
-
-RELAY_TOPIC_CMD = "homeassistant/switch/pca_relay/set"
-RELAY_TOPIC_STATE = "homeassistant/switch/pca_relay/state"
-
-def led0_start_blinking():
-    """Blinking thread - handles both LED and Relay modes"""
-    global led0_blink_running
-    
-    if led0_relay_mode:
-        pulse_duration = RELAY_PULSE_MS / 1000.0
-        off_duration = 0.5
-        
-        print(f"RELAY MODE on ch {LED0_CH}: {RELAY_PULSE_MS}ms ON / 500ms OFF")
-        
-        while led0_blink_running:
-            if not led0_blink_running: 
-                break
-            
-            pca.set_duty_12bit(LED0_CH, 4095)
-            time.sleep(pulse_duration)
-            
-            if not led0_blink_running: 
-                break
-                
-            pca.set_duty_12bit(LED0_CH, 0)
-            time.sleep(off_duration)
-            
-    else:
-        print(f"LED MODE on ch {LED0_CH}: brightness {led0_brightness}")
-        while led0_blink_running:
-            if not led0_blink_running: 
-                break
-            pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
-            for _ in range(5):
-                if not led0_blink_running: 
-                    break
-                time.sleep(0.1)
-            if not led0_blink_running: 
-                break
-            pca.set_duty_12bit(LED0_CH, 0)
-            for _ in range(5):
-                if not led0_blink_running: 
-                    break
-                time.sleep(0.1)
-    
-    pca.set_duty_12bit(LED0_CH, 0)
-    print(f"Blinking stopped on ch {LED0_CH}")
-
-def led0_stop_blinking():
-    global led0_blink_running, led0_blink_thread, led0_relay_mode
-    with led0_blink_lock:
-        led0_blink_running = False
-        if led0_blink_thread and led0_blink_thread.is_alive():
-            led0_blink_thread.join(timeout=2)
-        led0_blink_thread = None
-    pca.set_duty_12bit(LED0_CH, 0)
-
-def trigger_relay_single_pulse():
-    """Single relay pulse - non-blocking"""
-    pulse_duration = RELAY_PULSE_MS / 1000.0
-    
-    print(f"Relay pulse on ch {RELAY_CH}: {RELAY_PULSE_MS}ms")
-    pca.set_duty_12bit(RELAY_CH, 4095)
-    time.sleep(pulse_duration)
-    pca.set_duty_12bit(RELAY_CH, 0)
-    print("Relay pulse complete")
-
-def update_motor_pwm():
-    """Update physical motor PWM - MUST be called with motor_lock held"""
-    global motor_enabled, motor_value
-    
-    if not motor_enabled:
-        pca.set_duty_12bit(MOTOR_CH, 4095)
-        print("  → Motor PWM: 100% duty (SAFE STOP)")
+    if not pwm1_enabled:
+        pca.set_duty_12bit(CH_PWM1, 4095)
         return
-    
-    visual = motor_value
+
+    visual = float(pwm1_value)
     if visual == 0.0:
         pwm_percent = 100.0
     elif 0.0 < visual <= 10.0:
         pwm_percent = 90.0
     else:
         pwm_percent = 100.0 - visual
-    
+
     duty = int((pwm_percent / 100.0) * 4095)
     duty = max(0, min(4095, duty))
-    pca.set_duty_12bit(MOTOR_CH, duty)
-    print(f"  → Motor PWM: visual={visual:.0f}% → {pwm_percent:.0f}% duty → {duty}")
+    pca.set_duty_12bit(CH_PWM1, duty)
 
-def update_led1():
-    """Update LED1 solid state"""
-    pca.set_duty_12bit(LED1_CH, brightness_to_12bit(led1_brightness))
+
+def apply_switch(channel: int, state: bool):
+    if state:
+        channel_on(channel)
+    else:
+        channel_off(channel)
+
+
+def stepper_apply_dir(value: str):
+    global stepper_dir
+    stepper_dir = "CCW" if value == "CCW" else "CW"
+    apply_switch(CH_STEPPER_DIR, stepper_dir == "CW")
+
+
+def stepper_apply_ena(state: bool):
+    global stepper_ena
+    stepper_ena = bool(state)
+    apply_switch(CH_STEPPER_ENA, stepper_ena)
+
+
+def pu_worker():
+    global pu_running
+    last_level = None
+    last_enabled = None
+
+    while pu_running:
+        with pu_lock:
+            enabled = bool(pu_enabled)
+            freq = float(pu_freq_hz)
+
+        if (not enabled) or freq <= 0.0:
+            if last_level is not False:
+                channel_off(CH_PU)
+                last_level = False
+            if last_enabled is not False:
+                last_enabled = False
+            time.sleep(0.1)
+            continue
+
+        if last_enabled is not True:
+            last_enabled = True
+
+        half = 0.5 / freq
+        if last_level is not True:
+            channel_on(CH_PU)
+            last_level = True
+        time.sleep(half)
+        if not pu_running:
+            break
+        if last_level is not False:
+            channel_off(CH_PU)
+            last_level = False
+        time.sleep(half)
+
+    channel_off(CH_PU)
+
+
+def pu_start():
+    global pu_thread, pu_running
+    with pu_lock:
+        if pu_thread and pu_thread.is_alive():
+            return
+        pu_running = True
+        pu_thread = threading.Thread(target=pu_worker, daemon=True)
+        pu_thread.start()
+    logger.info("CH9 PU worker started")
+
+
+def pu_stop():
+    global pu_thread, pu_running
+    with pu_lock:
+        pu_running = False
+    if pu_thread and pu_thread.is_alive():
+        pu_thread.join(timeout=2)
+    pu_thread = None
+    channel_off(CH_PU)
+
+
+def sys_led_worker():
+    global sys_led_running
+    level = False
+    last_written = None
+
+    while sys_led_running:
+        level = not level
+        if level != last_written:
+            if level:
+                channel_on(CH_SYS_LED)
+            else:
+                channel_off(CH_SYS_LED)
+            last_written = level
+        time.sleep(1.0)
+
+    channel_off(CH_SYS_LED)
+
+
+def sys_led_start():
+    global sys_led_thread, sys_led_running
+    with sys_led_lock:
+        if sys_led_thread and sys_led_thread.is_alive():
+            return
+        sys_led_running = True
+        sys_led_thread = threading.Thread(target=sys_led_worker, daemon=True)
+        sys_led_thread.start()
+    logger.info("CH15 system LED blinking started")
+
+
+def sys_led_stop():
+    global sys_led_thread, sys_led_running
+    with sys_led_lock:
+        sys_led_running = False
+    if sys_led_thread and sys_led_thread.is_alive():
+        sys_led_thread.join(timeout=2)
+    sys_led_thread = None
+    channel_off(CH_SYS_LED)
+
+
+try:
+    pca.set_duty_12bit(CH_PWM1, 4095)
+    channel_off(CH_HEATER_1)
+    channel_off(CH_HEATER_2)
+    channel_off(CH_HEATER_3)
+    channel_off(CH_HEATER_4)
+    channel_off(CH_FAN_1)
+    channel_off(CH_FAN_2)
+    channel_off(CH_STEPPER_DIR)
+    channel_off(CH_STEPPER_ENA)
+    channel_off(CH_PU)
+    channel_off(CH_SYS_LED)
+except Exception as e:
+    logger.error("Fatal: cannot set initial channel states (%s)", e)
+    sys.exit(1)
+
+
+try:
+    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+except (AttributeError, TypeError):
+    client = mqtt.Client()
+
+if MQTT_USER and MQTT_PASS:
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+
 
 device_info = {
     "identifiers": ["pca9685_pwm_controller"],
     "name": "PCA9685 PWM Controller",
     "model": "PCA9685",
     "manufacturer": "NXP Semiconductors",
-    "sw_version": "0.0.29-brightness-fix"
+    "sw_version": "0.1.0-fixed-channels",
 }
 
+
 def publish_discovery():
-    """Publish HA discovery"""
     discoveries = [
-        ("switch", "pca_motor_enable", {
-            "name": "Motor Enable",
-            "unique_id": "pca_motor_enable",
-            "command_topic": SWITCH_TOPIC_CMD,
-            "state_topic": SWITCH_TOPIC_STATE,
-            "availability_topic": SWITCH_TOPIC_AVAIL,
+        ("switch", "pca_pwm1_enable", {
+            "name": "PWM 1 Enable (CH0)",
+            "unique_id": "pca_pwm1_enable",
+            "command_topic": TOPIC_PWM1_ENABLE_CMD,
+            "state_topic": TOPIC_PWM1_ENABLE_STATE,
+            "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info
+            "device": device_info,
         }),
-        ("number", "pca_motor_pwm", {
-            "name": "Motor Speed",
-            "unique_id": "pca_motor_pwm",
-            "command_topic": NUMBER_TOPIC_CMD,
-            "state_topic": NUMBER_TOPIC_STATE,
-            "availability_topic": NUMBER_TOPIC_AVAIL,
+        ("number", "pca_pwm1_duty", {
+            "name": "PWM 1 Duty (CH0)",
+            "unique_id": "pca_pwm1_duty",
+            "command_topic": TOPIC_PWM1_DUTY_CMD,
+            "state_topic": TOPIC_PWM1_DUTY_STATE,
+            "availability_topic": AVAIL_TOPIC,
             "min": 0,
             "max": 100,
             "step": 1,
             "unit_of_measurement": "%",
-            "device": device_info
+            "mode": "slider",
+            "device": device_info,
         }),
-        ("light", "pca_led0_blink", {
-            "name": "LED0 Blinking",
-            "unique_id": "pca_led0_blink",
-            "command_topic": LED0_TOPIC_CMD,
-            "state_topic": LED0_TOPIC_STATE,
-            "availability_topic": LED0_TOPIC_AVAIL,
-            "schema": "json",
-            "brightness": True,
-            "effect": True,
-            "effect_list": ["blink", "solid", "relay_pulse"],
-            "device": device_info
-        }),
-        ("light", "pca_led1_solid", {
-            "name": "LED1 On/OFF",
-            "unique_id": "pca_led1_solid",
-            "command_topic": LED1_TOPIC_CMD,
-            "state_topic": LED1_TOPIC_STATE,
-            "availability_topic": LED1_TOPIC_AVAIL,
-            "schema": "json",
-            "brightness": True,
-            "device": device_info
-        }),
-        ("switch", "pca_relay", {
-            "name": "Relay Pulse (Momentary)",
-            "unique_id": "pca_relay",
-            "command_topic": RELAY_TOPIC_CMD,
-            "state_topic": RELAY_TOPIC_STATE,
-            "availability_topic": SWITCH_TOPIC_AVAIL,
-            "payload_on": "TRIGGER",
+        ("switch", "pca_heater_1", {
+            "name": "Heater 1 (CH1)",
+            "unique_id": "pca_heater_1",
+            "command_topic": TOPIC_HEATER_1_CMD,
+            "state_topic": TOPIC_HEATER_1_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info
-        })
+            "device": device_info,
+        }),
+        ("switch", "pca_heater_2", {
+            "name": "Heater 2 (CH2)",
+            "unique_id": "pca_heater_2",
+            "command_topic": TOPIC_HEATER_2_CMD,
+            "state_topic": TOPIC_HEATER_2_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info,
+        }),
+        ("switch", "pca_heater_3", {
+            "name": "Heater 3 (CH3)",
+            "unique_id": "pca_heater_3",
+            "command_topic": TOPIC_HEATER_3_CMD,
+            "state_topic": TOPIC_HEATER_3_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info,
+        }),
+        ("switch", "pca_heater_4", {
+            "name": "Heater 4 (CH4)",
+            "unique_id": "pca_heater_4",
+            "command_topic": TOPIC_HEATER_4_CMD,
+            "state_topic": TOPIC_HEATER_4_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info,
+        }),
+        ("switch", "pca_fan_1", {
+            "name": "Fan 1 (CH5)",
+            "unique_id": "pca_fan_1",
+            "command_topic": TOPIC_FAN_1_CMD,
+            "state_topic": TOPIC_FAN_1_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info,
+        }),
+        ("switch", "pca_fan_2", {
+            "name": "Fan 2 (CH6)",
+            "unique_id": "pca_fan_2",
+            "command_topic": TOPIC_FAN_2_CMD,
+            "state_topic": TOPIC_FAN_2_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info,
+        }),
+        ("select", "pca_stepper_dir", {
+            "name": "Stepper DIR (CH7)",
+            "unique_id": "pca_stepper_dir",
+            "command_topic": TOPIC_STEPPER_DIR_CMD,
+            "state_topic": TOPIC_STEPPER_DIR_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "options": ["CW", "CCW"],
+            "device": device_info,
+        }),
+        ("switch", "pca_stepper_ena", {
+            "name": "Stepper ENA (CH8)",
+            "unique_id": "pca_stepper_ena",
+            "command_topic": TOPIC_STEPPER_ENA_CMD,
+            "state_topic": TOPIC_STEPPER_ENA_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info,
+        }),
+        ("switch", "pca_pu_enable", {
+            "name": "PU Enable (CH9)",
+            "unique_id": "pca_pu_enable",
+            "command_topic": TOPIC_PU_ENABLE_CMD,
+            "state_topic": TOPIC_PU_ENABLE_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info,
+        }),
+        ("number", "pca_pu_freq_hz", {
+            "name": "PU Frequency (CH9)",
+            "unique_id": "pca_pu_freq_hz",
+            "command_topic": TOPIC_PU_FREQ_CMD,
+            "state_topic": TOPIC_PU_FREQ_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "min": 0,
+            "max": 500,
+            "step": 1,
+            "unit_of_measurement": "Hz",
+            "mode": "slider",
+            "device": device_info,
+        }),
     ]
-    
+
     for component, unique_id, payload in discoveries:
         topic = f"homeassistant/{component}/{unique_id}/config"
         client.publish(topic, json.dumps(payload), retain=True)
-    
-    print("✓ Discovery messages published")
-    
-    for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
-        client.publish(topic, "online", retain=True)
-    
-    client.publish(SWITCH_TOPIC_STATE, "OFF", retain=True)
-    client.publish(NUMBER_TOPIC_STATE, "0", retain=True)
-    client.publish(LED0_TOPIC_STATE, json.dumps({"state": "OFF"}), retain=True)
-    client.publish(LED1_TOPIC_STATE, json.dumps({"state": "OFF", "brightness": 0}), retain=True)
-    client.publish(RELAY_TOPIC_STATE, "OFF", retain=True)
+
+    client.publish(AVAIL_TOPIC, "online", retain=True)
+
+    client.publish(TOPIC_PWM1_ENABLE_STATE, "OFF", retain=True)
+    client.publish(TOPIC_PWM1_DUTY_STATE, "0", retain=True)
+    client.publish(TOPIC_HEATER_1_STATE, "OFF", retain=True)
+    client.publish(TOPIC_HEATER_2_STATE, "OFF", retain=True)
+    client.publish(TOPIC_HEATER_3_STATE, "OFF", retain=True)
+    client.publish(TOPIC_HEATER_4_STATE, "OFF", retain=True)
+    client.publish(TOPIC_FAN_1_STATE, "OFF", retain=True)
+    client.publish(TOPIC_FAN_2_STATE, "OFF", retain=True)
+    client.publish(TOPIC_STEPPER_DIR_STATE, stepper_dir, retain=True)
+    client.publish(TOPIC_STEPPER_ENA_STATE, "OFF", retain=True)
+    client.publish(TOPIC_PU_ENABLE_STATE, "OFF", retain=True)
+    client.publish(TOPIC_PU_FREQ_STATE, str(int(pu_freq_hz)), retain=True)
+
+    logger.info("Discovery messages published")
+
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
-    """MQTT connection callback"""
-    rc = reason_code.value if hasattr(reason_code, 'value') else reason_code
-    
-    if rc == 0:
-        print(f"✓ Connected to MQTT broker {MQTT_HOST}:{MQTT_PORT}")
-        client.subscribe(SWITCH_TOPIC_CMD)
-        client.subscribe(NUMBER_TOPIC_CMD)
-        client.subscribe(LED0_TOPIC_CMD)
-        client.subscribe(LED1_TOPIC_CMD)
-        client.subscribe(RELAY_TOPIC_CMD)
-        publish_discovery()
-    else:
-        print(f"✗ MQTT connection failed with code {rc}")
+    rc = reason_code.value if hasattr(reason_code, "value") else reason_code
+    if rc != 0:
+        logger.error("MQTT connection failed with code %s", rc)
+        return
+
+    client.subscribe(TOPIC_PWM1_ENABLE_CMD)
+    client.subscribe(TOPIC_PWM1_DUTY_CMD)
+    client.subscribe(TOPIC_HEATER_1_CMD)
+    client.subscribe(TOPIC_HEATER_2_CMD)
+    client.subscribe(TOPIC_HEATER_3_CMD)
+    client.subscribe(TOPIC_HEATER_4_CMD)
+    client.subscribe(TOPIC_FAN_1_CMD)
+    client.subscribe(TOPIC_FAN_2_CMD)
+    client.subscribe(TOPIC_STEPPER_DIR_CMD)
+    client.subscribe(TOPIC_STEPPER_ENA_CMD)
+    client.subscribe(TOPIC_PU_ENABLE_CMD)
+    client.subscribe(TOPIC_PU_FREQ_CMD)
+    publish_discovery()
+
+    logger.info("Connected to MQTT broker %s:%s", MQTT_HOST, MQTT_PORT)
+
+
+def _payload_to_bool(payload: str) -> bool:
+    return payload == "ON"
+
 
 def on_message(client, userdata, msg):
-    """MQTT message callback"""
-    global motor_enabled, motor_value
-    global led0_brightness, led0_blink_thread, led0_blink_running, led1_brightness
-    global led0_relay_mode
-    
+    global pwm1_enabled, pwm1_value
+    global heater_1, heater_2, heater_3, heater_4
+    global fan_1, fan_2
+    global pu_enabled, pu_freq_hz
+
     topic = msg.topic
-    payload = msg.payload.decode("utf-8")
-    print(f"← MQTT [{topic}]: {payload[:60]}")
+    payload = msg.payload.decode("utf-8").strip()
 
     try:
-        if topic == SWITCH_TOPIC_CMD:
-            new_state = (payload == "ON")
-            
-            with motor_lock:
-                if new_state and not motor_enabled:
-                    motor_value = float(DEFAULT_DUTY_CYCLE)
-                    motor_enabled = True
-                    update_motor_pwm()
-                    client.publish(SWITCH_TOPIC_STATE, "ON", retain=True)
-                    client.publish(NUMBER_TOPIC_STATE, str(int(motor_value)), retain=True)
-                    print(f"→ Motor ENABLED at {int(motor_value)}%")
-                
-                elif not new_state and motor_enabled:
-                    motor_enabled = False
-                    motor_value = 0.0
-                    update_motor_pwm()
-                    client.publish(SWITCH_TOPIC_STATE, "OFF", retain=True)
-                    client.publish(NUMBER_TOPIC_STATE, "0", retain=True)
-                    print("→ Motor DISABLED (SAFE STOP)")
+        if topic == TOPIC_PWM1_ENABLE_CMD:
+            new_state = _payload_to_bool(payload)
+            with pwm1_lock:
+                if new_state and not pwm1_enabled:
+                    pwm1_value = float(DEFAULT_DUTY_CYCLE)
+                pwm1_enabled = new_state
+                update_pwm1_output_locked()
+                client.publish(TOPIC_PWM1_ENABLE_STATE, "ON" if pwm1_enabled else "OFF", retain=True)
+                client.publish(TOPIC_PWM1_DUTY_STATE, str(int(pwm1_value if pwm1_enabled else 0)), retain=True)
 
-        elif topic == NUMBER_TOPIC_CMD:
+        elif topic == TOPIC_PWM1_DUTY_CMD:
             value = max(0.0, min(100.0, float(payload)))
-            
-            with motor_lock:
-                motor_value = value
-                should_be_enabled = (value > 0.0)
-                
-                if should_be_enabled != motor_enabled:
-                    motor_enabled = should_be_enabled
-                    client.publish(SWITCH_TOPIC_STATE, "ON" if should_be_enabled else "OFF", retain=True)
-                    print(f"→ Auto-sync switch: {'ON' if should_be_enabled else 'OFF'}")
-                
-                update_motor_pwm()
-                client.publish(NUMBER_TOPIC_STATE, str(int(value)), retain=True)
-                
-                if value == 0.0:
-                    print("→ CRITICAL: Slider=0 → SAFE STOP")
+            with pwm1_lock:
+                pwm1_value = value
+                pwm1_enabled = value > 0.0
+                update_pwm1_output_locked()
+                client.publish(TOPIC_PWM1_ENABLE_STATE, "ON" if pwm1_enabled else "OFF", retain=True)
+                client.publish(TOPIC_PWM1_DUTY_STATE, str(int(value)), retain=True)
 
-        elif topic == LED0_TOPIC_CMD:
-            data = json.loads(payload)
-            state = data.get("state", "OFF")
-            brightness = max(0, min(255, int(data.get("brightness", 255))))
-            effect = data.get("effect", "blink")
+        elif topic == TOPIC_HEATER_1_CMD:
+            heater_1 = _payload_to_bool(payload)
+            apply_switch(CH_HEATER_1, heater_1)
+            client.publish(TOPIC_HEATER_1_STATE, "ON" if heater_1 else "OFF", retain=True)
 
-            led0_brightness = brightness
-            led0_stop_blinking()
+        elif topic == TOPIC_HEATER_2_CMD:
+            heater_2 = _payload_to_bool(payload)
+            apply_switch(CH_HEATER_2, heater_2)
+            client.publish(TOPIC_HEATER_2_STATE, "ON" if heater_2 else "OFF", retain=True)
 
-            if state == "OFF":
-                client.publish(LED0_TOPIC_STATE, json.dumps({"state": "OFF"}), retain=True)
-            else:
-                if effect == "relay_pulse":
-                    led0_relay_mode = True
-                    with led0_blink_lock:
-                        led0_blink_running = True
-                        led0_blink_thread = threading.Thread(
-                            target=led0_start_blinking,
-                            daemon=True
-                        )
-                        led0_blink_thread.start()
-                    state_payload = {"state": "ON", "brightness": 255, "effect": "relay_pulse"}
-                    print(f"→ Auto-relay mode ON ({RELAY_PULSE_MS}ms pulses)")
-                
-                elif effect == "blink":
-                    led0_relay_mode = False
-                    with led0_blink_lock:
-                        led0_blink_running = True
-                        led0_blink_thread = threading.Thread(
-                            target=led0_start_blinking,
-                            daemon=True
-                        )
-                        led0_blink_thread.start()
-                    state_payload = {"state": "ON", "brightness": led0_brightness, "effect": "blink"}
-                else:  # solid
-                    led0_relay_mode = False
-                    pca.set_duty_12bit(LED0_CH, brightness_to_12bit(led0_brightness))
-                    state_payload = {"state": "ON", "brightness": led0_brightness, "effect": "solid"}
-                
-                client.publish(LED0_TOPIC_STATE, json.dumps(state_payload), retain=True)
+        elif topic == TOPIC_HEATER_3_CMD:
+            heater_3 = _payload_to_bool(payload)
+            apply_switch(CH_HEATER_3, heater_3)
+            client.publish(TOPIC_HEATER_3_STATE, "ON" if heater_3 else "OFF", retain=True)
 
-        # ========== ПОПРАВЕНА СЕКЦИЯ ЗА LED1 ==========
-        elif topic == LED1_TOPIC_CMD:
-            data = json.loads(payload)
-            state = data.get("state", "OFF")
-            
-            # ПОПРАВКА: Ако няма brightness в JSON, но state е ON -> използваме 255 (пълна яркост)
-            # или запазената стойност ако е > 0
-            if "brightness" in data:
-                brightness = max(0, min(255, int(data["brightness"])))
-            else:
-                # Ако липсва brightness ключ в JSON
-                if state == "ON":
-                    brightness = led1_brightness if led1_brightness > 0 else 255
-                    print(f"  → No brightness in JSON, using {brightness}")
-                else:
-                    brightness = 0
-            
-            led1_brightness = brightness if state == "ON" else 0
-            update_led1()
-            
-            state_payload = {
-                "state": "ON" if (state == "ON" and led1_brightness > 0) else "OFF",
-                "brightness": led1_brightness
-            }
-            client.publish(LED1_TOPIC_STATE, json.dumps(state_payload), retain=True)
-            print(f"→ LED1 (ch {LED1_CH}): {'ON' if state=='ON' else 'OFF'} brightness={led1_brightness}")
+        elif topic == TOPIC_HEATER_4_CMD:
+            heater_4 = _payload_to_bool(payload)
+            apply_switch(CH_HEATER_4, heater_4)
+            client.publish(TOPIC_HEATER_4_STATE, "ON" if heater_4 else "OFF", retain=True)
 
-        # ==============================================
+        elif topic == TOPIC_FAN_1_CMD:
+            fan_1 = _payload_to_bool(payload)
+            apply_switch(CH_FAN_1, fan_1)
+            client.publish(TOPIC_FAN_1_STATE, "ON" if fan_1 else "OFF", retain=True)
 
-        elif topic == RELAY_TOPIC_CMD:
-            if payload == "TRIGGER":
-                # Стартираме в отделна нишка за да не блокираме MQTT
-                threading.Thread(target=trigger_relay_single_pulse, daemon=True).start()
-                # Switch-ът се връща в OFF веднага - това е нормално за momentary button
-                client.publish(RELAY_TOPIC_STATE, "ON", retain=True)
-                time.sleep(0.05)
-                client.publish(RELAY_TOPIC_STATE, "OFF", retain=True)
-                print(f"→ Relay TRIGGER sent (ch {RELAY_CH})")
-            elif payload == "OFF":
-                pca.set_duty_12bit(RELAY_CH, 0)
-                client.publish(RELAY_TOPIC_STATE, "OFF", retain=True)
+        elif topic == TOPIC_FAN_2_CMD:
+            fan_2 = _payload_to_bool(payload)
+            apply_switch(CH_FAN_2, fan_2)
+            client.publish(TOPIC_FAN_2_STATE, "ON" if fan_2 else "OFF", retain=True)
 
-    except Exception as e:
-        print(f"✗ Error processing {topic}: {e}")
-        import traceback
-        traceback.print_exc()
+        elif topic == TOPIC_STEPPER_DIR_CMD:
+            stepper_apply_dir(payload)
+            client.publish(TOPIC_STEPPER_DIR_STATE, stepper_dir, retain=True)
+
+        elif topic == TOPIC_STEPPER_ENA_CMD:
+            stepper_apply_ena(_payload_to_bool(payload))
+            client.publish(TOPIC_STEPPER_ENA_STATE, "ON" if stepper_ena else "OFF", retain=True)
+
+        elif topic == TOPIC_PU_ENABLE_CMD:
+            with pu_lock:
+                pu_enabled = _payload_to_bool(payload)
+            if pu_enabled:
+                pu_start()
+            client.publish(TOPIC_PU_ENABLE_STATE, "ON" if pu_enabled else "OFF", retain=True)
+
+        elif topic == TOPIC_PU_FREQ_CMD:
+            hz = max(0.0, float(payload))
+            with pu_lock:
+                pu_freq_hz = hz
+            client.publish(TOPIC_PU_FREQ_STATE, str(int(hz)), retain=True)
+
+    except Exception:
+        logger.exception("Error processing topic=%s payload=%s", topic, payload)
+
 
 client.on_connect = on_connect
 client.on_message = on_message
 
+
 def safe_shutdown(signum=None, frame=None):
-    print("\n" + "="*50)
-    print("SHUTDOWN - Executing safety sequence...")
-    print("="*50)
-    
     try:
-        print("→ Motor to SAFE STOP (100% duty)...")
-        pca.set_duty_12bit(MOTOR_CH, 4095)
-        time.sleep(0.2)
-        
-        print("→ Stopping LEDs/Relay...")
-        led0_stop_blinking()
-        pca.set_duty_12bit(LED0_CH, 0)
-        pca.set_duty_12bit(LED1_CH, 0)
-        pca.set_duty_12bit(RELAY_CH, 0)
-        
-        print("→ Setting offline...")
-        for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
-            client.publish(topic, "offline", retain=True)
-        
-        print("→ Disconnecting MQTT...")
+        sys_led_stop()
+        pu_stop()
+
+        with pwm1_lock:
+            pwm1_enabled = False
+            pwm1_value = 0.0
+            update_pwm1_output_locked()
+
+        channel_off(CH_HEATER_1)
+        channel_off(CH_HEATER_2)
+        channel_off(CH_HEATER_3)
+        channel_off(CH_HEATER_4)
+        channel_off(CH_FAN_1)
+        channel_off(CH_FAN_2)
+        channel_off(CH_STEPPER_DIR)
+        channel_off(CH_STEPPER_ENA)
+        channel_off(CH_PU)
+        channel_off(CH_SYS_LED)
+
+        client.publish(AVAIL_TOPIC, "offline", retain=True)
         client.loop_stop()
         client.disconnect()
-        
-        print("→ Closing I2C...")
         pca.close()
-        
-        print("="*50)
-        print("✓ Shutdown complete")
-        print("="*50)
-        
-    except Exception as e:
-        print(f"! Shutdown error: {e}")
-    
+
+    except Exception:
+        logger.exception("Shutdown error")
+
     sys.exit(0 if signum is not None else 1)
+
 
 signal.signal(signal.SIGTERM, safe_shutdown)
 signal.signal(signal.SIGINT, safe_shutdown)
 
-# ---------- Connect with retries ----------
-print(f"Connecting to MQTT {MQTT_HOST}:{MQTT_PORT}...")
+
+logger.info("Connecting to MQTT %s:%s...", MQTT_HOST, MQTT_PORT)
 for attempt in range(1, 11):
     try:
         client.connect(MQTT_HOST, MQTT_PORT, 60)
         client.loop_start()
         time.sleep(2)
         if client.is_connected():
-            print("✓ MQTT connected")
             break
-        raise Exception("Timeout")
+        raise RuntimeError("Timeout")
     except Exception as e:
-        print(f"⚠ Attempt {attempt}/10: {e}")
         if attempt == 10:
-            print("✗ Max retries - exiting with motor in SAFE STOP")
+            logger.error("MQTT connect failed after retries (%s)", e)
             safe_shutdown()
         time.sleep(1.5 ** (attempt - 1))
 
-print("="*50)
-print("✅ Service running - awaiting commands")
-print("="*50)
+sys_led_start()
+
+logger.info("Service running")
+logger.setLevel(logging.ERROR)
 
 while True:
     time.sleep(5)
     if not client.is_connected():
-        print("⚠ MQTT disconnected - reconnecting...")
         try:
             client.reconnect()
-            print("✓ Reconnected")
-            for topic in [SWITCH_TOPIC_AVAIL, NUMBER_TOPIC_AVAIL, LED0_TOPIC_AVAIL, LED1_TOPIC_AVAIL]:
-                client.publish(topic, "online", retain=True)
-        except Exception as e:
-            print(f"✗ Reconnect failed: {e}")
+            client.publish(AVAIL_TOPIC, "online", retain=True)
+        except Exception:
+            logger.exception("MQTT reconnect failed")

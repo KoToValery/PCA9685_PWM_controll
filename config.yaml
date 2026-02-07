@@ -1,7 +1,8 @@
 name: "PCA9685 PWM Controller"
-version: "0.0.31"
+version: "0.1.0"
 slug: "pca9685_pwm"
 description: "Control PCA9685 PWM board via MQTT for motors, LEDs and relays"
+description: "Fixed-channel PCA9685 controller via MQTT Discovery (PWM, heaters, fans, stepper control)"
 init: false
 arch:
   - aarch64
@@ -24,13 +25,8 @@ options:
   mqtt_password: "mqtt_password"
   pca_address: "0x40"
   pca_frequency: 1000
-  motor_channel: 0
-  led0_channel: 1
-  led1_channel: 2
-  # НОВИ ПОЛЕТА ЗА РЕЛЕТО:
-  relay_channel: 15        # Отделен канал (15 = последен, далеч от мотора)
-  relay_pulse_ms: 75       # ms за задържане (50-100 препоръчително)
   default_duty_cycle: 30
+  pu_default_hz: 10.0
 schema:
   mqtt_host: str
   mqtt_port: port
@@ -38,10 +34,5 @@ schema:
   mqtt_password: password?
   pca_address: match(^0x[0-9A-Fa-f]{2}$)
   pca_frequency: int(24,1526)
-  motor_channel: int(0,15)
-  led0_channel: int(0,15)
-  led1_channel: int(0,15)
-  # НОВИ ПОЛЕТА В SCHEMA:
-  relay_channel: int(0,15)     # PCA9685 има 16 канала (0-15)
-  relay_pulse_ms: int(10,500)  # Мин 10ms, макс 500ms (сигурен диапазон)
   default_duty_cycle: int(0,100)
+  pu_default_hz: float?
