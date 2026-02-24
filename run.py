@@ -230,12 +230,19 @@ def channel_off(channel: int):
 
 
 logger.info("Opening I2C bus %s, PCA9685 addr=%s", I2C_BUS, hex(PCA_ADDR))
-try:
-    pca = PCA9685(I2C_BUS, PCA_ADDR)
-    pca.set_pwm_freq(PCA_FREQ)
-    logger.info("PCA9685 global PWM frequency set to %s Hz", PCA_FREQ)
-except Exception as e:
-    logger.error("Fatal: Cannot initialize PCA9685 (%s)", e)
+pca = None
+for attempt in range(1, 11):
+    try:
+        pca = PCA9685(I2C_BUS, PCA_ADDR)
+        pca.set_pwm_freq(PCA_FREQ)
+        logger.info("PCA9685 global PWM frequency set to %s Hz", PCA_FREQ)
+        break
+    except Exception as e:
+        logger.warning("Attempt %d/10: Cannot initialize PCA9685 (%s). Retrying in 2s...", attempt, e)
+        time.sleep(2)
+
+if pca is None:
+    logger.error("Fatal: Failed to initialize PCA9685 after 10 attempts.")
     sys.exit(1)
 
 
