@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 import time
+import subprocess
 
 try:
     import requests
@@ -24,6 +25,13 @@ _handler = logging.StreamHandler(stream=sys.stdout)
 _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
+
+# --- Kernel Module Check ---
+try:
+    logger.info("Checking i2c-dev module...")
+    subprocess.run(["modprobe", "i2c-dev"], check=False)
+except Exception as e:
+    logger.warning("Failed to run modprobe i2c-dev: %s", e)
 
 MODE1 = 0x00
 MODE2 = 0x01
