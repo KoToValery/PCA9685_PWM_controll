@@ -1,5 +1,9 @@
 name: "PCA9685 PWM Controller"
+<<<<<<< HEAD
 version: "0.1.2"
+=======
+version: "0.1.1"
+>>>>>>> 10887d03c15e4171a029d988a2ad2299260e6eed
 slug: "pca9685_pwm"
 description: "Control PCA9685 PWM board via MQTT for motors, LEDs and relays"
 description: "Fixed-channel PCA9685 controller via MQTT Discovery (PWM, heaters, fans, stepper control)"
@@ -17,7 +21,7 @@ map:
   - config
   - dev
 devices:
-  - /dev/i2c-1:/dev/i2c-1:rw
+  - "/dev/i2c-1"
 options:
   mqtt_host: "supervisor"
   mqtt_port: 1883
