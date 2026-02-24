@@ -12,6 +12,7 @@ arch:
 startup: "services"
 boot: auto
 host_network: true
+host_network: true
 homeassistant_api: true
 map:
   - config
@@ -23,6 +24,7 @@ privileged:
 devices:
   - /dev/i2c-1:/dev/i2c-1:rw
 options:
+  mqtt_host: "core-mosquitto"
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883
   mqtt_username: "mqtt"
