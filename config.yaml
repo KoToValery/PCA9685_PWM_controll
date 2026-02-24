@@ -1,5 +1,5 @@
 name: "PCA9685 PWM Controller"
-version: "0.1.0"
+version: "0.1.2"
 slug: "pca9685_pwm"
 description: "Control PCA9685 PWM board via MQTT for motors, LEDs and relays"
 description: "Fixed-channel PCA9685 controller via MQTT Discovery (PWM, heaters, fans, stepper control)"
@@ -11,7 +11,7 @@ arch:
   - amd64
 startup: "services"
 boot: auto
-host_network: true
+#host_network: true
 homeassistant_api: true
 map:
   - config
