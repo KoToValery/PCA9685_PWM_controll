@@ -96,6 +96,96 @@ class PCA9685:
         self.set_pwm(channel, 0, duty)
 
 
+class BME280:
+    def __init__(self, bus_num: int, address: int = 0x76):
+        self.address = address
+        self.bus = SMBus(bus_num)
+        self.cal = {}
+        self._load_calibration()
+        # Initialize sensor
+        self.bus.write_byte_data(self.address, 0xF2, 0x01)  # Humidity oversampling x1
+        self.bus.write_byte_data(self.address, 0xF4, 0x27)  # Temp/Press oversampling x1, normal mode
+        self.bus.write_byte_data(self.address, 0xF5, 0xA0)  # Standby 1000ms, filter off
+
+    def _load_calibration(self):
+        def read_u16(reg):
+            data = self.bus.read_i2c_block_data(self.address, reg, 2)
+            return data[0] | (data[1] << 8)
+
+        def read_s16(reg):
+            val = read_u16(reg)
+            return val if val < 32768 else val - 65536
+
+        self.cal['T1'] = read_u16(0x88)
+        self.cal['T2'] = read_s16(0x8A)
+        self.cal['T3'] = read_s16(0x8C)
+        self.cal['P1'] = read_u16(0x8E)
+        self.cal['P2'] = read_s16(0x90)
+        self.cal['P3'] = read_s16(0x92)
+        self.cal['P4'] = read_s16(0x94)
+        self.cal['P5'] = read_s16(0x96)
+        self.cal['P6'] = read_s16(0x98)
+        self.cal['P7'] = read_s16(0x9A)
+        self.cal['P8'] = read_s16(0x9C)
+        self.cal['P9'] = read_s16(0x9E)
+        self.cal['H1'] = self.bus.read_byte_data(self.address, 0xA1)
+        self.cal['H2'] = read_s16(0xE1)
+        self.cal['H3'] = self.bus.read_byte_data(self.address, 0xE3)
+        h4_msb = self.bus.read_byte_data(self.address, 0xE4)
+        h4_lsb = self.bus.read_byte_data(self.address, 0xE5)
+        self.cal['H4'] = (h4_msb << 4) | (h4_lsb & 0x0F)
+        h5_msb = self.bus.read_byte_data(self.address, 0xE6)
+        h5_lsb = self.bus.read_byte_data(self.address, 0xE5)
+        self.cal['H5'] = (h5_msb << 4) | (h5_lsb >> 4)
+        self.cal['H6'] = self.bus.read_byte_data(self.address, 0xE7)
+        if self.cal['H6'] > 127: self.cal['H6'] -= 256
+
+    def read_data(self):
+        data = self.bus.read_i2c_block_data(self.address, 0xF7, 8)
+        pres_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
+        temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
+        hum_raw = (data[6] << 8) | data[7]
+
+        # Temp compensation
+        v1 = (temp_raw / 16384.0 - self.cal['T1'] / 1024.0) * self.cal['T2']
+        v2 = ((temp_raw / 131072.0 - self.cal['T1'] / 8192.0) ** 2) * self.cal['T3']
+        t_fine = v1 + v2
+        temp = t_fine / 5120.0
+
+        # Pressure compensation
+        v1 = (t_fine / 2.0) - 64000.0
+        v2 = v1 * v1 * self.cal['P6'] / 32768.0
+        v2 = v2 + v1 * self.cal['P5'] * 2.0
+        v2 = (v2 / 4.0) + (self.cal['P4'] * 65536.0)
+        v1 = (self.cal['P3'] * v1 * v1 / 524288.0 + self.cal['P2'] * v1) / 524288.0
+        v1 = (1.0 + v1 / 32768.0) * self.cal['P1']
+        if v1 == 0:
+            pressure = 0
+        else:
+            pressure = 2147483647 - pres_raw
+            pressure = ((pressure - v2 / 4096.0) * 6250.0) / v1
+            v1 = self.cal['P9'] * pressure * pressure / 2147483648.0
+            v2 = pressure * self.cal['P8'] / 32768.0
+            pressure = pressure + (v1 + v2 + self.cal['P7']) / 16.0
+            pressure /= 100.0  # hPa
+
+        # Humidity compensation
+        h = t_fine - 76800.0
+        h = (hum_raw - (self.cal['H4'] * 64.0 + self.cal['H5'] / 16384.0 * h)) * \
+            (self.cal['H2'] / 65536.0 * (1.0 + self.cal['H6'] / 67108864.0 * h * \
+            (1.0 + self.cal['H3'] / 67108864.0 * h)))
+        h = h * (1.0 - self.cal['H1'] * h / 524288.0)
+        humidity = max(0, min(100, h))
+
+        return temp, pressure, humidity
+
+    def close(self):
+        try:
+            self.bus.close()
+        except Exception:
+            pass
+
+
 CH_PWM1 = 0
 CH_HEATER_1 = 1
 CH_HEATER_2 = 2
@@ -148,6 +238,7 @@ MQTT_PASS = config.get("mqtt_password") or None
 
 I2C_BUS = int(config.get("i2c_bus", 1))
 PCA_ADDR = int(config["pca_address"], 16)
+BME_ADDR = int(config.get("bme_address", "0x76"), 16)
 PCA_FREQ = int(config.get("pca_frequency", 1000))
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
@@ -194,6 +285,10 @@ TOPIC_PU_ENABLE_STATE = _topic("switch", "pca_pu_enable", "state")
 
 TOPIC_PU_FREQ_CMD = _topic("number", "pca_pu_freq_hz", "set")
 TOPIC_PU_FREQ_STATE = _topic("number", "pca_pu_freq_hz", "state")
+
+TOPIC_BME_TEMP = _topic("sensor", "bme280_temperature", "state")
+TOPIC_BME_HUM = _topic("sensor", "bme280_humidity", "state")
+TOPIC_BME_PRESS = _topic("sensor", "bme280_pressure", "state")
 
 
 def validate_fixed_mapping():
@@ -246,6 +341,15 @@ if pca is None:
     sys.exit(1)
 
 
+logger.info("Opening I2C bus %s, BME280 addr=%s", I2C_BUS, hex(BME_ADDR))
+bme = None
+try:
+    bme = BME280(I2C_BUS, BME_ADDR)
+    logger.info("BME280 sensor initialized")
+except Exception as e:
+    logger.warning("BME280 initialization failed: %s. Sensor will be disabled.", e)
+
+
 pwm1_enabled = False
 pwm1_value = 0.0
 pwm1_lock = threading.Lock()
@@ -269,6 +373,47 @@ pu_running = False
 sys_led_thread = None
 sys_led_running = False
 sys_led_lock = threading.Lock()
+
+
+bme_thread = None
+bme_running = False
+bme_lock = threading.Lock()
+
+
+def bme_worker():
+    global bme_running
+    while bme_running:
+        if bme:
+            try:
+                temp, press, hum = bme.read_data()
+                client.publish(TOPIC_BME_TEMP, f"{temp:.2f}", retain=True)
+                client.publish(TOPIC_BME_PRESS, f"{press:.2f}", retain=True)
+                client.publish(TOPIC_BME_HUM, f"{hum:.2f}", retain=True)
+            except Exception as e:
+                logger.error("BME280 read error: %s", e)
+        time.sleep(60)
+
+
+def bme_start():
+    global bme_thread, bme_running
+    if not bme:
+        return
+    with bme_lock:
+        if bme_thread and bme_thread.is_alive():
+            return
+        bme_running = True
+        bme_thread = threading.Thread(target=bme_worker, daemon=True)
+        bme_thread.start()
+    logger.info("BME280 sensor thread started")
+
+
+def bme_stop():
+    global bme_thread, bme_running
+    with bme_lock:
+        bme_running = False
+    if bme_thread and bme_thread.is_alive():
+        bme_thread.join(timeout=2)
+    bme_thread = None
 
 
 def update_pwm1_output_locked():
@@ -569,6 +714,30 @@ def publish_discovery():
             "mode": "slider",
             "device": device_info,
         }),
+        ("sensor", "bme280_temperature", {
+            "name": "BME280 Temperature",
+            "unique_id": "bme280_temperature",
+            "state_topic": TOPIC_BME_TEMP,
+            "unit_of_measurement": "°C",
+            "device_class": "temperature",
+            "device": device_info,
+        }),
+        ("sensor", "bme280_humidity", {
+            "name": "BME280 Humidity",
+            "unique_id": "bme280_humidity",
+            "state_topic": TOPIC_BME_HUM,
+            "unit_of_measurement": "%",
+            "device_class": "humidity",
+            "device": device_info,
+        }),
+        ("sensor", "bme280_pressure", {
+            "name": "BME280 Pressure",
+            "unique_id": "bme280_pressure",
+            "state_topic": TOPIC_BME_PRESS,
+            "unit_of_measurement": "hPa",
+            "device_class": "pressure",
+            "device": device_info,
+        }),
     ]
 
     for component, unique_id, payload in discoveries:
@@ -710,6 +879,7 @@ client.on_message = on_message
 
 def safe_shutdown(signum=None, frame=None):
     try:
+        bme_stop()
         sys_led_stop()
         pu_stop()
 
@@ -760,6 +930,7 @@ for attempt in range(1, 11):
         time.sleep(1.5 ** (attempt - 1))
 
 sys_led_start()
+bme_start()
 
 logger.info("Service running")
 logger.setLevel(logging.ERROR)
