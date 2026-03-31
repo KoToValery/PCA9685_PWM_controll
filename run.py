@@ -101,9 +101,15 @@ class BME280:
         self.address = address
         self.bus = SMBus(bus_num)
         self.cal = {}
+        # Check Chip ID (BME280 = 0x60, BMP280 = 0x58)
+        chip_id = self.bus.read_byte_data(self.address, 0xD0)
+        if chip_id not in [0x60, 0x58]:
+            raise RuntimeError(f"Unexpected Chip ID: {hex(chip_id)}. Expected 0x60 or 0x58.")
+        self.is_bme = (chip_id == 0x60)
         self._load_calibration()
         # Initialize sensor
-        self.bus.write_byte_data(self.address, 0xF2, 0x01)  # Humidity oversampling x1
+        if self.is_bme:
+            self.bus.write_byte_data(self.address, 0xF2, 0x01)  # Humidity oversampling x1
         self.bus.write_byte_data(self.address, 0xF4, 0x27)  # Temp/Press oversampling x1, normal mode
         self.bus.write_byte_data(self.address, 0xF5, 0xA0)  # Standby 1000ms, filter off
 
@@ -128,23 +134,29 @@ class BME280:
         self.cal['P7'] = read_s16(0x9A)
         self.cal['P8'] = read_s16(0x9C)
         self.cal['P9'] = read_s16(0x9E)
-        self.cal['H1'] = self.bus.read_byte_data(self.address, 0xA1)
-        self.cal['H2'] = read_s16(0xE1)
-        self.cal['H3'] = self.bus.read_byte_data(self.address, 0xE3)
-        h4_msb = self.bus.read_byte_data(self.address, 0xE4)
-        h4_lsb = self.bus.read_byte_data(self.address, 0xE5)
-        self.cal['H4'] = (h4_msb << 4) | (h4_lsb & 0x0F)
-        h5_msb = self.bus.read_byte_data(self.address, 0xE6)
-        h5_lsb = self.bus.read_byte_data(self.address, 0xE5)
-        self.cal['H5'] = (h5_msb << 4) | (h5_lsb >> 4)
-        self.cal['H6'] = self.bus.read_byte_data(self.address, 0xE7)
-        if self.cal['H6'] > 127: self.cal['H6'] -= 256
+        if self.is_bme:
+            self.cal['H1'] = self.bus.read_byte_data(self.address, 0xA1)
+            self.cal['H2'] = read_s16(0xE1)
+            self.cal['H3'] = self.bus.read_byte_data(self.address, 0xE3)
+            h4_msb = self.bus.read_byte_data(self.address, 0xE4)
+            h4_lsb = self.bus.read_byte_data(self.address, 0xE5)
+            h4 = (h4_msb << 4) | (h4_lsb & 0x0F)
+            self.cal['H4'] = h4 if h4 < 2048 else h4 - 4096
+            h5_msb = self.bus.read_byte_data(self.address, 0xE6)
+            h5_lsb = self.bus.read_byte_data(self.address, 0xE5)
+            h5 = (h5_msb << 4) | (h5_lsb >> 4)
+            self.cal['H5'] = h5 if h5 < 2048 else h5 - 4096
+            self.cal['H6'] = self.bus.read_byte_data(self.address, 0xE7)
+            if self.cal['H6'] > 127: self.cal['H6'] -= 256
 
     def read_data(self):
-        data = self.bus.read_i2c_block_data(self.address, 0xF7, 8)
+        data = self.bus.read_i2c_block_data(self.address, 0xF7, 8 if self.is_bme else 6)
         pres_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
         temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
-        hum_raw = (data[6] << 8) | data[7]
+        hum_raw = ((data[6] << 8) | data[7]) if self.is_bme else 0
+
+        if temp_raw == 0x80000 or pres_raw == 0x80000:
+            return None, None, None
 
         # Temp compensation
         v1 = (temp_raw / 16384.0 - self.cal['T1'] / 1024.0) * self.cal['T2']
@@ -159,23 +171,26 @@ class BME280:
         v2 = (v2 / 4.0) + (self.cal['P4'] * 65536.0)
         v1 = (self.cal['P3'] * v1 * v1 / 524288.0 + self.cal['P2'] * v1) / 524288.0
         v1 = (1.0 + v1 / 32768.0) * self.cal['P1']
-        if v1 == 0:
+        if v1 < 0.0001:  # Avoid division by zero or extreme values
             pressure = 0
         else:
-            pressure = 2147483647 - pres_raw
-            pressure = ((pressure - v2 / 4096.0) * 6250.0) / v1
-            v1 = self.cal['P9'] * pressure * pressure / 2147483648.0
-            v2 = pressure * self.cal['P8'] / 32768.0
-            pressure = pressure + (v1 + v2 + self.cal['P7']) / 16.0
+            p = 1048576.0 - pres_raw
+            p = ((p - v2 / 4096.0) * 6250.0) / v1
+            v1_p = self.cal['P9'] * p * p / 2147483648.0
+            v2_p = p * self.cal['P8'] / 32768.0
+            pressure = p + (v1_p + v2_p + self.cal['P7']) / 16.0
             pressure /= 100.0  # hPa
 
         # Humidity compensation
-        h = t_fine - 76800.0
-        h = (hum_raw - (self.cal['H4'] * 64.0 + self.cal['H5'] / 16384.0 * h)) * \
-            (self.cal['H2'] / 65536.0 * (1.0 + self.cal['H6'] / 67108864.0 * h * \
-            (1.0 + self.cal['H3'] / 67108864.0 * h)))
-        h = h * (1.0 - self.cal['H1'] * h / 524288.0)
-        humidity = max(0, min(100, h))
+        if self.is_bme:
+            h = t_fine - 76800.0
+            h = (hum_raw - (self.cal['H4'] * 64.0 + self.cal['H5'] / 16384.0 * h)) * \
+                (self.cal['H2'] / 65536.0 * (1.0 + self.cal['H6'] / 67108864.0 * h * \
+                (1.0 + self.cal['H3'] / 67108864.0 * h)))
+            h = h * (1.0 - self.cal['H1'] * h / 524288.0)
+            humidity = max(0, min(100, h))
+        else:
+            humidity = 0
 
         return temp, pressure, humidity
 
@@ -386,9 +401,13 @@ def bme_worker():
         if bme:
             try:
                 temp, press, hum = bme.read_data()
-                client.publish(TOPIC_BME_TEMP, f"{temp:.2f}", retain=True)
-                client.publish(TOPIC_BME_PRESS, f"{press:.2f}", retain=True)
-                client.publish(TOPIC_BME_HUM, f"{hum:.2f}", retain=True)
+                if temp is not None:
+                    client.publish(TOPIC_BME_TEMP, f"{temp:.2f}", retain=True)
+                    client.publish(TOPIC_BME_PRESS, f"{press:.2f}", retain=True)
+                    if bme.is_bme:
+                        client.publish(TOPIC_BME_HUM, f"{hum:.2f}", retain=True)
+                else:
+                    logger.warning("BME280: Invalid data read (sensor might be busy)")
             except Exception as e:
                 logger.error("BME280 read error: %s", e)
         time.sleep(60)
