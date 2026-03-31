@@ -254,6 +254,7 @@ MQTT_PASS = config.get("mqtt_password") or None
 I2C_BUS = int(config.get("i2c_bus", 1))
 PCA_ADDR = int(config["pca_address"], 16)
 BME_ADDR = int(config.get("bme_address", "0x76"), 16)
+BME_INTERVAL = int(config.get("bme_interval", 60))
 PCA_FREQ = int(config.get("pca_frequency", 1000))
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
@@ -410,7 +411,7 @@ def bme_worker():
                     logger.warning("BME280: Invalid data read (sensor might be busy)")
             except Exception as e:
                 logger.error("BME280 read error: %s", e)
-        time.sleep(60)
+        time.sleep(BME_INTERVAL)
 
 
 def bme_start():
@@ -597,29 +598,54 @@ if MQTT_USER and MQTT_PASS:
     client.username_pw_set(MQTT_USER, MQTT_PASS)
 
 
-device_info = {
-    "identifiers": ["pca9685_pwm_controller"],
-    "name": "PCA9685 PWM Controller",
+device_info_main = {
+    "identifiers": ["pca9685_pwm_controller_main"],
+    "name": "PWM Controller (PCA9685)",
     "model": "PCA9685",
     "manufacturer": "NXP Semiconductors",
-    "sw_version": "0.1.0-fixed-channels",
+    "sw_version": "0.1.8",
+}
+
+device_info_heaters = {
+    "identifiers": ["pca9685_heaters"],
+    "name": "Heaters",
+    "via_device": "pca9685_pwm_controller_main",
+}
+
+device_info_fans = {
+    "identifiers": ["pca9685_fans"],
+    "name": "Fans",
+    "via_device": "pca9685_pwm_controller_main",
+}
+
+device_info_stepper = {
+    "identifiers": ["pca9685_stepper"],
+    "name": "Stepper Control",
+    "via_device": "pca9685_pwm_controller_main",
+}
+
+device_info_bme = {
+    "identifiers": ["pca9685_bme280"],
+    "name": "BME280 Sensor",
+    "model": "BME280",
+    "via_device": "pca9685_pwm_controller_main",
 }
 
 
 def publish_discovery():
     discoveries = [
         ("switch", "pca_pwm1_enable", {
-            "name": "PWM 1 Enable (CH0)",
+            "name": "PWM 1 Enable",
             "unique_id": "pca_pwm1_enable",
             "command_topic": TOPIC_PWM1_ENABLE_CMD,
             "state_topic": TOPIC_PWM1_ENABLE_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_main,
         }),
         ("number", "pca_pwm1_duty", {
-            "name": "PWM 1 Duty (CH0)",
+            "name": "PWM 1 Duty",
             "unique_id": "pca_pwm1_duty",
             "command_topic": TOPIC_PWM1_DUTY_CMD,
             "state_topic": TOPIC_PWM1_DUTY_STATE,
@@ -629,99 +655,99 @@ def publish_discovery():
             "step": 1,
             "unit_of_measurement": "%",
             "mode": "slider",
-            "device": device_info,
+            "device": device_info_main,
         }),
         ("switch", "pca_heater_1", {
-            "name": "Heater 1 (CH1)",
+            "name": "Heater 1",
             "unique_id": "pca_heater_1",
             "command_topic": TOPIC_HEATER_1_CMD,
             "state_topic": TOPIC_HEATER_1_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_heaters,
         }),
         ("switch", "pca_heater_2", {
-            "name": "Heater 2 (CH2)",
+            "name": "Heater 2",
             "unique_id": "pca_heater_2",
             "command_topic": TOPIC_HEATER_2_CMD,
             "state_topic": TOPIC_HEATER_2_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_heaters,
         }),
         ("switch", "pca_heater_3", {
-            "name": "Heater 3 (CH3)",
+            "name": "Heater 3",
             "unique_id": "pca_heater_3",
             "command_topic": TOPIC_HEATER_3_CMD,
             "state_topic": TOPIC_HEATER_3_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_heaters,
         }),
         ("switch", "pca_heater_4", {
-            "name": "Heater 4 (CH4)",
+            "name": "Heater 4",
             "unique_id": "pca_heater_4",
             "command_topic": TOPIC_HEATER_4_CMD,
             "state_topic": TOPIC_HEATER_4_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_heaters,
         }),
         ("switch", "pca_fan_1", {
-            "name": "Fan 1 (CH5)",
+            "name": "Fan 1",
             "unique_id": "pca_fan_1",
             "command_topic": TOPIC_FAN_1_CMD,
             "state_topic": TOPIC_FAN_1_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_fans,
         }),
         ("switch", "pca_fan_2", {
-            "name": "Fan 2 (CH6)",
+            "name": "Fan 2",
             "unique_id": "pca_fan_2",
             "command_topic": TOPIC_FAN_2_CMD,
             "state_topic": TOPIC_FAN_2_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_fans,
         }),
         ("select", "pca_stepper_dir", {
-            "name": "Stepper DIR (CH7)",
+            "name": "DIR",
             "unique_id": "pca_stepper_dir",
             "command_topic": TOPIC_STEPPER_DIR_CMD,
             "state_topic": TOPIC_STEPPER_DIR_STATE,
             "availability_topic": AVAIL_TOPIC,
             "options": ["CW", "CCW"],
-            "device": device_info,
+            "device": device_info_stepper,
         }),
         ("switch", "pca_stepper_ena", {
-            "name": "Stepper ENA (CH8)",
+            "name": "ENA",
             "unique_id": "pca_stepper_ena",
             "command_topic": TOPIC_STEPPER_ENA_CMD,
             "state_topic": TOPIC_STEPPER_ENA_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_stepper,
         }),
         ("switch", "pca_pu_enable", {
-            "name": "PU Enable (CH9)",
+            "name": "PU Enable",
             "unique_id": "pca_pu_enable",
             "command_topic": TOPIC_PU_ENABLE_CMD,
             "state_topic": TOPIC_PU_ENABLE_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info,
+            "device": device_info_main,
         }),
         ("number", "pca_pu_freq_hz", {
-            "name": "PU Frequency (CH9)",
+            "name": "PU Frequency",
             "unique_id": "pca_pu_freq_hz",
             "command_topic": TOPIC_PU_FREQ_CMD,
             "state_topic": TOPIC_PU_FREQ_STATE,
@@ -731,31 +757,31 @@ def publish_discovery():
             "step": 1,
             "unit_of_measurement": "Hz",
             "mode": "slider",
-            "device": device_info,
+            "device": device_info_main,
         }),
         ("sensor", "bme280_temperature", {
-            "name": "BME280 Temperature",
+            "name": "Temperature",
             "unique_id": "bme280_temperature",
             "state_topic": TOPIC_BME_TEMP,
             "unit_of_measurement": "°C",
             "device_class": "temperature",
-            "device": device_info,
+            "device": device_info_bme,
         }),
         ("sensor", "bme280_humidity", {
-            "name": "BME280 Humidity",
+            "name": "Humidity",
             "unique_id": "bme280_humidity",
             "state_topic": TOPIC_BME_HUM,
             "unit_of_measurement": "%",
             "device_class": "humidity",
-            "device": device_info,
+            "device": device_info_bme,
         }),
         ("sensor", "bme280_pressure", {
-            "name": "BME280 Pressure",
+            "name": "Pressure",
             "unique_id": "bme280_pressure",
             "state_topic": TOPIC_BME_PRESS,
             "unit_of_measurement": "hPa",
             "device_class": "pressure",
-            "device": device_info,
+            "device": device_info_bme,
         }),
     ]
 
