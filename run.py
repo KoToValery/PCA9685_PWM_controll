@@ -598,37 +598,27 @@ if MQTT_USER and MQTT_PASS:
     client.username_pw_set(MQTT_USER, MQTT_PASS)
 
 
-device_info_main = {
-    "identifiers": ["pca9685_pwm_controller_main"],
-    "name": "PWM Controller (PCA9685)",
+device_info_stepper = {
+    "identifiers": ["pca9685_stepper_control"],
+    "name": "Stepper Control",
     "model": "PCA9685",
     "manufacturer": "NXP Semiconductors",
-    "sw_version": "0.1.8",
 }
 
 device_info_heaters = {
     "identifiers": ["pca9685_heaters"],
     "name": "Heaters",
-    "via_device": "pca9685_pwm_controller_main",
 }
 
 device_info_fans = {
     "identifiers": ["pca9685_fans"],
     "name": "Fans",
-    "via_device": "pca9685_pwm_controller_main",
-}
-
-device_info_stepper = {
-    "identifiers": ["pca9685_stepper"],
-    "name": "Stepper Control",
-    "via_device": "pca9685_pwm_controller_main",
 }
 
 device_info_bme = {
     "identifiers": ["pca9685_bme280"],
-    "name": "BME280 Sensor",
+    "name": "Environment Sensor",
     "model": "BME280",
-    "via_device": "pca9685_pwm_controller_main",
 }
 
 
@@ -642,7 +632,7 @@ def publish_discovery():
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info_main,
+            "device": device_info_stepper,
         }),
         ("number", "pca_pwm1_duty", {
             "name": "PWM 1 Duty",
@@ -655,7 +645,7 @@ def publish_discovery():
             "step": 1,
             "unit_of_measurement": "%",
             "mode": "slider",
-            "device": device_info_main,
+            "device": device_info_stepper,
         }),
         ("switch", "pca_heater_1", {
             "name": "Heater 1",
@@ -744,7 +734,7 @@ def publish_discovery():
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info_main,
+            "device": device_info_stepper,
         }),
         ("number", "pca_pu_freq_hz", {
             "name": "PU Frequency",
@@ -757,7 +747,7 @@ def publish_discovery():
             "step": 1,
             "unit_of_measurement": "Hz",
             "mode": "slider",
-            "device": device_info_main,
+            "device": device_info_stepper,
         }),
         ("sensor", "bme280_temperature", {
             "name": "Temperature",
