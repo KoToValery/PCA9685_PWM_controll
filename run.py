@@ -96,6 +96,56 @@ class PCA9685:
         self.set_pwm(channel, 0, duty)
 
 
+class PCA9539:
+    """PCA9539 16-bit I2C GPIO expander."""
+    INPUT0 = 0x00
+    INPUT1 = 0x01
+    OUTPUT0 = 0x02
+    OUTPUT1 = 0x03
+    CONFIG0 = 0x06
+    CONFIG1 = 0x07
+
+    def __init__(self, bus_num: int, address: int):
+        self.address = address
+        self.bus = SMBus(bus_num)
+        # Configure all pins as inputs by default (1 = Input, 0 = Output)
+        self.bus.write_byte_data(self.address, self.CONFIG0, 0xFF)
+        self.bus.write_byte_data(self.address, self.CONFIG1, 0xFF)
+
+    def read_inputs(self):
+        """Read all 16 pins. Returns a 16-bit integer."""
+        low = self.bus.read_byte_data(self.address, self.INPUT0)
+        high = self.bus.read_byte_data(self.address, self.INPUT1)
+        return (high << 8) | low
+
+    def close(self):
+        try:
+            self.bus.close()
+        except Exception:
+            pass
+
+
+class PCA9540B:
+    """PCA9540B 1-of-2 I2C multiplexer."""
+    CH_NONE = 0x00
+    CH0 = 0x04
+    CH1 = 0x05
+
+    def __init__(self, bus_num: int, address: int):
+        self.address = address
+        self.bus = SMBus(bus_num)
+
+    def select_channel(self, channel_code: int):
+        """Select channel: 0x04 for CH0, 0x05 for CH1, 0x00 for none."""
+        self.bus.write_byte(self.address, channel_code)
+
+    def close(self):
+        try:
+            self.bus.close()
+        except Exception:
+            pass
+
+
 class BME280:
     def __init__(self, bus_num: int, address: int = 0x76):
         self.address = address
@@ -206,11 +256,16 @@ CH_HEATER_1 = 1
 CH_HEATER_2 = 2
 CH_HEATER_3 = 3
 CH_HEATER_4 = 4
-CH_FAN_1 = 5
-CH_FAN_2 = 6
+CH_FAN_1_POWER = 5
+CH_FAN_2_POWER = 6
 CH_STEPPER_DIR = 7
 CH_STEPPER_ENA = 8
 CH_PU = 9
+CH_PWM2 = 10
+CH_RESERVE1 = 11
+CH_LED_RED = 12
+CH_LED_BLUE = 13
+CH_LED_GREEN = 14
 CH_SYS_LED = 15
 
 
@@ -253,6 +308,8 @@ MQTT_PASS = config.get("mqtt_password") or None
 
 I2C_BUS = int(config.get("i2c_bus", 1))
 PCA_ADDR = int(config["pca_address"], 16)
+PCA9539_ADDR = int(config.get("pca9539_address", "0x74"), 16)
+PCA9540_ADDR = int(config.get("pca9540_address", "0x70"), 16)
 BME_ADDR = int(config.get("bme_address", "0x76"), 16)
 BME_INTERVAL = int(config.get("bme_interval", 60))
 PCA_FREQ = int(config.get("pca_frequency", 1000))
@@ -285,10 +342,23 @@ TOPIC_HEATER_3_STATE = _topic("switch", "pca_heater_3", "state")
 TOPIC_HEATER_4_CMD = _topic("switch", "pca_heater_4", "set")
 TOPIC_HEATER_4_STATE = _topic("switch", "pca_heater_4", "state")
 
-TOPIC_FAN_1_CMD = _topic("switch", "pca_fan_1", "set")
-TOPIC_FAN_1_STATE = _topic("switch", "pca_fan_1", "state")
-TOPIC_FAN_2_CMD = _topic("switch", "pca_fan_2", "set")
-TOPIC_FAN_2_STATE = _topic("switch", "pca_fan_2", "state")
+TOPIC_FAN_1_POWER_CMD = _topic("switch", "pca_fan_1_power", "set")
+TOPIC_FAN_1_POWER_STATE = _topic("switch", "pca_fan_1_power", "state")
+TOPIC_FAN_2_POWER_CMD = _topic("switch", "pca_fan_2_power", "set")
+TOPIC_FAN_2_POWER_STATE = _topic("switch", "pca_fan_2_power", "state")
+
+TOPIC_PWM2_ENABLE_CMD = _topic("switch", "pca_pwm2_enable", "set")
+TOPIC_PWM2_ENABLE_STATE = _topic("switch", "pca_pwm2_enable", "state")
+
+TOPIC_PWM2_DUTY_CMD = _topic("number", "pca_pwm2_duty", "set")
+TOPIC_PWM2_DUTY_STATE = _topic("number", "pca_pwm2_duty", "state")
+
+TOPIC_LED_RED_CMD = _topic("switch", "pca_led_red", "set")
+TOPIC_LED_RED_STATE = _topic("switch", "pca_led_red", "state")
+TOPIC_LED_BLUE_CMD = _topic("switch", "pca_led_blue", "set")
+TOPIC_LED_BLUE_STATE = _topic("switch", "pca_led_blue", "state")
+TOPIC_LED_GREEN_CMD = _topic("switch", "pca_led_green", "set")
+TOPIC_LED_GREEN_STATE = _topic("switch", "pca_led_green", "state")
 
 TOPIC_STEPPER_DIR_CMD = _topic("select", "pca_stepper_dir", "set")
 TOPIC_STEPPER_DIR_STATE = _topic("select", "pca_stepper_dir", "state")
@@ -302,9 +372,35 @@ TOPIC_PU_ENABLE_STATE = _topic("switch", "pca_pu_enable", "state")
 TOPIC_PU_FREQ_CMD = _topic("number", "pca_pu_freq_hz", "set")
 TOPIC_PU_FREQ_STATE = _topic("number", "pca_pu_freq_hz", "state")
 
-TOPIC_BME_TEMP = _topic("sensor", "bme280_temperature", "state")
-TOPIC_BME_HUM = _topic("sensor", "bme280_humidity", "state")
-TOPIC_BME_PRESS = _topic("sensor", "bme280_pressure", "state")
+TOPIC_BME_CH0_76_TEMP = _topic("sensor", "bme280_ch0_0x76_temperature", "state")
+TOPIC_BME_CH0_76_HUM = _topic("sensor", "bme280_ch0_0x76_humidity", "state")
+TOPIC_BME_CH0_76_PRESS = _topic("sensor", "bme280_ch0_0x76_pressure", "state")
+
+TOPIC_BME_CH0_77_TEMP = _topic("sensor", "bme280_ch0_0x77_temperature", "state")
+TOPIC_BME_CH0_77_HUM = _topic("sensor", "bme280_ch0_0x77_humidity", "state")
+TOPIC_BME_CH0_77_PRESS = _topic("sensor", "bme280_ch0_0x77_pressure", "state")
+
+TOPIC_BME_CH1_76_TEMP = _topic("sensor", "bme280_ch1_0x76_temperature", "state")
+TOPIC_BME_CH1_76_HUM = _topic("sensor", "bme280_ch1_0x76_humidity", "state")
+TOPIC_BME_CH1_76_PRESS = _topic("sensor", "bme280_ch1_0x76_pressure", "state")
+
+TOPIC_PCA9539_INPUTS = "homeassistant/sensor/pca9539_inputs/state"
+
+# Feedback status topics (LEDs)
+TOPIC_FEEDBACK_ENA = _topic("sensor", "status_ena", "state")
+TOPIC_FEEDBACK_DIR = _topic("sensor", "status_dir", "state")
+TOPIC_FEEDBACK_PU = _topic("sensor", "status_pu", "state")
+TOPIC_FEEDBACK_FAN1 = _topic("sensor", "status_fan1", "state")
+TOPIC_FEEDBACK_FAN2 = _topic("sensor", "status_fan2", "state")
+TOPIC_FEEDBACK_RELAY1 = _topic("sensor", "status_relay1", "state")
+TOPIC_FEEDBACK_RELAY2 = _topic("sensor", "status_relay2", "state")
+TOPIC_FEEDBACK_RELAY3 = _topic("sensor", "status_relay3", "state")
+TOPIC_FEEDBACK_RELAY4 = _topic("sensor", "status_relay4", "state")
+TOPIC_FEEDBACK_RELAY5 = _topic("sensor", "status_relay5", "state")
+TOPIC_FEEDBACK_RELAY6 = _topic("sensor", "status_relay6", "state")
+
+TOPIC_RES3 = _topic("sensor", "status_res3", "state")
+TOPIC_RES4 = _topic("sensor", "status_res4", "state")
 
 
 def validate_fixed_mapping():
@@ -314,11 +410,16 @@ def validate_fixed_mapping():
         CH_HEATER_2,
         CH_HEATER_3,
         CH_HEATER_4,
-        CH_FAN_1,
-        CH_FAN_2,
+        CH_FAN_1_POWER,
+        CH_FAN_2_POWER,
         CH_STEPPER_DIR,
         CH_STEPPER_ENA,
         CH_PU,
+        CH_PWM2,
+        CH_RESERVE1,
+        CH_LED_RED,
+        CH_LED_BLUE,
+        CH_LED_GREEN,
         CH_SYS_LED,
     ]
     for ch in channels:
@@ -357,25 +458,61 @@ if pca is None:
     sys.exit(1)
 
 
-logger.info("Opening I2C bus %s, BME280 addr=%s", I2C_BUS, hex(BME_ADDR))
-bme = None
+logger.info("Opening I2C bus %s, PCA9539 addr=%s", I2C_BUS, hex(PCA9539_ADDR))
+pca9539 = None
 try:
-    bme = BME280(I2C_BUS, BME_ADDR)
-    logger.info("BME280 sensor initialized")
+    pca9539 = PCA9539(I2C_BUS, PCA9539_ADDR)
+    logger.info("PCA9539 GPIO expander initialized")
 except Exception as e:
-    logger.warning("BME280 initialization failed: %s. Sensor will be disabled.", e)
+    logger.warning("PCA9539 initialization failed: %s. GPIO feedback will be disabled.", e)
+
+
+logger.info("Opening I2C bus %s, PCA9540B addr=%s", I2C_BUS, hex(PCA9540_ADDR))
+pca9540 = None
+try:
+    pca9540 = PCA9540B(I2C_BUS, PCA9540_ADDR)
+    logger.info("PCA9540B multiplexer initialized")
+except Exception as e:
+    logger.warning("PCA9540B initialization failed: %s. I2C multiplexing disabled.", e)
+
+
+def init_bme(channel_code: int, address: int, label: str):
+    if not pca9540:
+        return None
+    try:
+        pca9540.select_channel(channel_code)
+        time.sleep(0.01)
+        sensor = BME280(I2C_BUS, address)
+        logger.info("BME280 sensor initialized on %s at %s", label, hex(address))
+        return sensor
+    except Exception as e:
+        logger.warning("BME280 initialization failed on %s at %s: %s", label, hex(address), e)
+        return None
+
+
+bme_ch0_76 = init_bme(PCA9540B.CH0, 0x76, "CH0")
+bme_ch0_77 = init_bme(PCA9540B.CH0, 0x77, "CH0")
+bme_ch1_76 = init_bme(PCA9540B.CH1, 0x76, "CH1")
 
 
 pwm1_enabled = False
 pwm1_value = 0.0
 pwm1_lock = threading.Lock()
 
+pwm2_enabled = False
+pwm2_value = 0.0
+pwm2_lock = threading.Lock()
+
 heater_1 = False
 heater_2 = False
 heater_3 = False
 heater_4 = False
-fan_1 = False
-fan_2 = False
+fan_1_power = False
+fan_2_power = False
+
+led_red = False
+led_blue = False
+led_green = False
 
 stepper_dir = "CW"
 stepper_ena = False
@@ -396,27 +533,199 @@ bme_running = False
 bme_lock = threading.Lock()
 
 
+pca9539_thread = None
+pca9539_running = False
+pca9539_lock = threading.Lock()
+
+
+def pca9539_worker():
+    global pca9539_running
+    global heater_1, heater_2, heater_3, heater_4
+    global fan_1_power, fan_2_power
+    global stepper_ena, stepper_dir
+    global pu_enabled
+    global pwm1_enabled, pwm2_enabled
+
+    last_inputs = None
+    
+    # Pulse detection state
+    # We'll store a history of the last 3 states for pulsing signals
+    taxo1_history = []
+    taxo2_history = []
+    pu_history = []
+    
+    # Initial status: Blue (Initialization)
+    feedback_topics = [
+        TOPIC_FEEDBACK_ENA, TOPIC_FEEDBACK_DIR, TOPIC_FEEDBACK_PU,
+        TOPIC_FEEDBACK_FAN1, TOPIC_FEEDBACK_FAN2,
+        TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY3,
+        TOPIC_FEEDBACK_RELAY4, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6
+    ]
+    for topic in feedback_topics:
+        client.publish(topic, "blue", retain=True)
+
+    while pca9539_running:
+        if pca9539:
+            try:
+                inputs = pca9539.read_inputs()
+                if inputs != last_inputs:
+                    client.publish(TOPIC_PCA9539_INPUTS, json.dumps({"raw": inputs, "hex": hex(inputs)}), retain=True)
+                    last_inputs = inputs
+                
+    # Feedback Logic
+    # IO0: 0-5 Relays, 6-7 TAXO
+    # IO1: 0 ENA, 1 DIR, 2 PU, 4 RES4, 5 RES3
+
+    # Relays (IO0_0 to IO0_5) - High=OFF (1), Low=ON (0)
+    relays_states = [heater_1, heater_2, heater_3, heater_4, fan_1_power, fan_2_power]
+    relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY3, 
+                    TOPIC_FEEDBACK_RELAY4, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
+    
+    for i in range(6):
+        expected_on = relays_states[i]
+        actual_bit = (inputs >> i) & 1
+        # If expected ON, bit should be 0. If expected OFF, bit should be 1.
+        is_ok = (expected_on == (actual_bit == 0))
+        client.publish(relay_topics[i], "green" if is_ok else "red", retain=True)
+
+    # Stepper (IO1_0 to IO1_2 -> bits 8 to 10)
+    # ENA (IO1_0)
+    ena_actual = (inputs >> 8) & 1
+    ena_ok = (stepper_ena == (ena_actual == 1))
+    client.publish(TOPIC_FEEDBACK_ENA, "green" if ena_ok else "red", retain=True)
+
+    # DIR (IO1_1)
+    dir_actual = (inputs >> 9) & 1
+    dir_expected_high = (stepper_dir == "CW")
+    dir_ok = (dir_expected_high == (dir_actual == 1))
+    client.publish(TOPIC_FEEDBACK_DIR, "green" if dir_ok else "red", retain=True)
+
+    # PU (IO1_2) - This is a pulse.
+    pu_actual = (inputs >> 10) & 1
+    if not pu_enabled:
+        pu_ok = (pu_actual == 0)
+    else:
+        # Check if pulsing: bit should change over time
+        pu_history.append(pu_actual)
+        if len(pu_history) > 5: pu_history.pop(0)
+        # If all readings in history are the same, it's stuck
+        if len(pu_history) >= 3 and all(x == pu_history[0] for x in pu_history):
+            pu_ok = False
+        else:
+            pu_ok = True
+    client.publish(TOPIC_FEEDBACK_PU, "green" if pu_ok else "red", retain=True)
+
+    # Reserve inputs IO1_4 (RES4), IO1_5 (RES3)
+    res4_actual = (inputs >> 12) & 1
+    res3_actual = (inputs >> 13) & 1
+    client.publish(TOPIC_RES4, "ON" if res4_actual == 1 else "OFF", retain=True)
+    client.publish(TOPIC_RES3, "ON" if res3_actual == 1 else "OFF", retain=True)
+
+                # Fans TAXO (IO0_6, IO0_7)
+                # Fan 1 (PWM1)
+                taxo1_actual = (inputs >> 6) & 1
+                if pwm1_enabled:
+                    taxo1_history.append(taxo1_actual)
+                    if len(taxo1_history) > 5: taxo1_history.pop(0)
+                    if len(taxo1_history) >= 3 and all(x == taxo1_history[0] for x in taxo1_history):
+                        fan1_ok = False
+                    else:
+                        fan1_ok = True
+                else:
+                    taxo1_history = []
+                    fan1_ok = (taxo1_actual == 1) # Pullup
+                client.publish(TOPIC_FEEDBACK_FAN1, "green" if fan1_ok else "red", retain=True)
+
+                # Fan 2 (PWM2)
+                taxo2_actual = (inputs >> 7) & 1
+                if pwm2_enabled:
+                    taxo2_history.append(taxo2_actual)
+                    if len(taxo2_history) > 5: taxo2_history.pop(0)
+                    if len(taxo2_history) >= 3 and all(x == taxo2_history[0] for x in taxo2_history):
+                        fan2_ok = False
+                    else:
+                        fan2_ok = True
+                else:
+                    taxo2_history = []
+                    fan2_ok = (taxo2_actual == 1)
+                client.publish(TOPIC_FEEDBACK_FAN2, "green" if fan2_ok else "red", retain=True)
+
+            except Exception as e:
+                logger.error("PCA9539 read error: %s", e)
+        time.sleep(1.0)
+
+
+def pca9539_start():
+    global pca9539_thread, pca9539_running
+    if not pca9539:
+        return
+    with pca9539_lock:
+        if pca9539_thread and pca9539_thread.is_alive():
+            return
+        pca9539_running = True
+        pca9539_thread = threading.Thread(target=pca9539_worker, daemon=True)
+        pca9539_thread.start()
+    logger.info("PCA9539 expander thread started")
+
+
+def pca9539_stop():
+    global pca9539_thread, pca9539_running
+    with pca9539_lock:
+        pca9539_running = False
+    if pca9539_thread and pca9539_thread.is_alive():
+        pca9539_thread.join(timeout=2)
+    pca9539_thread = None
+
+
 def bme_worker():
     global bme_running
     while bme_running:
-        if bme:
+        # Read CH0
+        if pca9540:
             try:
-                temp, press, hum = bme.read_data()
-                if temp is not None:
-                    client.publish(TOPIC_BME_TEMP, f"{temp:.2f}", retain=True)
-                    client.publish(TOPIC_BME_PRESS, f"{press:.2f}", retain=True)
-                    if bme.is_bme:
-                        client.publish(TOPIC_BME_HUM, f"{hum:.2f}", retain=True)
-                else:
-                    logger.warning("BME280: Invalid data read (sensor might be busy)")
+                pca9540.select_channel(PCA9540B.CH0)
+                time.sleep(0.01)
+                
+                # Sensor at 0x76
+                if bme_ch0_76:
+                    temp, press, hum = bme_ch0_76.read_data()
+                    if temp is not None:
+                        client.publish(TOPIC_BME_CH0_76_TEMP, f"{temp:.2f}", retain=True)
+                        client.publish(TOPIC_BME_CH0_76_PRESS, f"{press:.2f}", retain=True)
+                        if bme_ch0_76.is_bme:
+                            client.publish(TOPIC_BME_CH0_76_HUM, f"{hum:.2f}", retain=True)
+                
+                # Sensor at 0x77
+                if bme_ch0_77:
+                    temp, press, hum = bme_ch0_77.read_data()
+                    if temp is not None:
+                        client.publish(TOPIC_BME_CH0_77_TEMP, f"{temp:.2f}", retain=True)
+                        client.publish(TOPIC_BME_CH0_77_PRESS, f"{press:.2f}", retain=True)
+                        if bme_ch0_77.is_bme:
+                            client.publish(TOPIC_BME_CH0_77_HUM, f"{hum:.2f}", retain=True)
             except Exception as e:
-                logger.error("BME280 read error: %s", e)
+                logger.error("BME280 CH0 read error: %s", e)
+
+        # Read CH1
+        if bme_ch1_76 and pca9540:
+            try:
+                pca9540.select_channel(PCA9540B.CH1)
+                time.sleep(0.01)
+                temp, press, hum = bme_ch1_76.read_data()
+                if temp is not None:
+                    client.publish(TOPIC_BME_CH1_76_TEMP, f"{temp:.2f}", retain=True)
+                    client.publish(TOPIC_BME_CH1_76_PRESS, f"{press:.2f}", retain=True)
+                    if bme_ch1_76.is_bme:
+                        client.publish(TOPIC_BME_CH1_76_HUM, f"{hum:.2f}", retain=True)
+            except Exception as e:
+                logger.error("BME280 CH1 read error: %s", e)
+
         time.sleep(BME_INTERVAL)
 
 
 def bme_start():
     global bme_thread, bme_running
-    if not bme:
+    if not (bme_ch0_76 or bme_ch0_77 or bme_ch1_76):
         return
     with bme_lock:
         if bme_thread and bme_thread.is_alive():
@@ -454,6 +763,26 @@ def update_pwm1_output_locked():
     duty = int((pwm_percent / 100.0) * 4095)
     duty = max(0, min(4095, duty))
     pca.set_duty_12bit(CH_PWM1, duty)
+
+
+def update_pwm2_output_locked():
+    global pwm2_enabled, pwm2_value
+
+    if not pwm2_enabled:
+        pca.set_duty_12bit(CH_PWM2, 4095)
+        return
+
+    visual = float(pwm2_value)
+    if visual == 0.0:
+        pwm_percent = 100.0
+    elif 0.0 < visual <= 10.0:
+        pwm_percent = 90.0
+    else:
+        pwm_percent = 100.0 - visual
+
+    duty = int((pwm_percent / 100.0) * 4095)
+    duty = max(0, min(4095, duty))
+    pca.set_duty_12bit(CH_PWM2, duty)
 
 
 def apply_switch(channel: int, state: bool):
@@ -574,15 +903,20 @@ def sys_led_stop():
 
 try:
     pca.set_duty_12bit(CH_PWM1, 4095)
+    pca.set_duty_12bit(CH_PWM2, 4095)
     channel_off(CH_HEATER_1)
     channel_off(CH_HEATER_2)
     channel_off(CH_HEATER_3)
     channel_off(CH_HEATER_4)
-    channel_off(CH_FAN_1)
-    channel_off(CH_FAN_2)
+    channel_off(CH_FAN_1_POWER)
+    channel_off(CH_FAN_2_POWER)
     channel_off(CH_STEPPER_DIR)
     channel_off(CH_STEPPER_ENA)
     channel_off(CH_PU)
+    channel_off(CH_RESERVE1)
+    channel_off(CH_LED_RED)
+    channel_off(CH_LED_BLUE)
+    channel_off(CH_LED_GREEN)
     channel_off(CH_SYS_LED)
 except Exception as e:
     logger.error("Fatal: cannot set initial channel states (%s)", e)
@@ -612,30 +946,58 @@ device_info_heaters = {
 
 device_info_fans = {
     "identifiers": ["pca9685_fans"],
-    "name": "Fans",
+    "name": "Fans Control",
 }
 
-device_info_bme = {
-    "identifiers": ["pca9685_bme280"],
-    "name": "Environment Sensor",
-    "model": "BME280",
+device_info_leds = {
+    "identifiers": ["pca9685_leds"],
+    "name": "Status LEDs",
+}
+
+device_info_pca9539 = {
+    "identifiers": ["pca9539_expander"],
+    "name": "GPIO Feedback",
+    "model": "PCA9539",
+}
+
+device_info_bme_ch0_76 = {
+    "identifiers": ["pca9685_bme280_ch0_0x76"],
+    "name": "BME280 CH0 0x76",
+    "model": "BME280/BMP280",
+}
+
+device_info_bme_ch0_77 = {
+    "identifiers": ["pca9685_bme280_ch0_0x77"],
+    "name": "BME280 CH0 0x77",
+    "model": "BME280/BMP280",
+}
+
+device_info_bme_ch1_76 = {
+    "identifiers": ["pca9685_bme280_ch1_0x76"],
+    "name": "BME280 CH1 0x76",
+    "model": "BME280/BMP280",
+}
+
+device_info_feedback = {
+    "identifiers": ["pca9685_feedback_status"],
+    "name": "Hardware Feedback Status",
 }
 
 
 def publish_discovery():
     discoveries = [
         ("switch", "pca_pwm1_enable", {
-            "name": "PWM 1 Enable",
+            "name": "FAN 1 Speed Enable",
             "unique_id": "pca_pwm1_enable",
             "command_topic": TOPIC_PWM1_ENABLE_CMD,
             "state_topic": TOPIC_PWM1_ENABLE_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info_stepper,
+            "device": device_info_fans,
         }),
         ("number", "pca_pwm1_duty", {
-            "name": "PWM 1 Duty",
+            "name": "FAN 1 Speed Duty",
             "unique_id": "pca_pwm1_duty",
             "command_topic": TOPIC_PWM1_DUTY_CMD,
             "state_topic": TOPIC_PWM1_DUTY_STATE,
@@ -645,7 +1007,50 @@ def publish_discovery():
             "step": 1,
             "unit_of_measurement": "%",
             "mode": "slider",
-            "device": device_info_stepper,
+            "device": device_info_fans,
+        }),
+        ("switch", "pca_fan_1_power", {
+            "name": "FAN 1 Power",
+            "unique_id": "pca_fan_1_power",
+            "command_topic": TOPIC_FAN_1_POWER_CMD,
+            "state_topic": TOPIC_FAN_1_POWER_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info_fans,
+        }),
+        ("switch", "pca_pwm2_enable", {
+            "name": "FAN 2 Speed Enable",
+            "unique_id": "pca_pwm2_enable",
+            "command_topic": TOPIC_PWM2_ENABLE_CMD,
+            "state_topic": TOPIC_PWM2_ENABLE_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info_fans,
+        }),
+        ("number", "pca_pwm2_duty", {
+            "name": "FAN 2 Speed Duty",
+            "unique_id": "pca_pwm2_duty",
+            "command_topic": TOPIC_PWM2_DUTY_CMD,
+            "state_topic": TOPIC_PWM2_DUTY_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "unit_of_measurement": "%",
+            "mode": "slider",
+            "device": device_info_fans,
+        }),
+        ("switch", "pca_fan_2_power", {
+            "name": "FAN 2 Power",
+            "unique_id": "pca_fan_2_power",
+            "command_topic": TOPIC_FAN_2_POWER_CMD,
+            "state_topic": TOPIC_FAN_2_POWER_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info_fans,
         }),
         ("switch", "pca_heater_1", {
             "name": "Heater 1",
@@ -687,25 +1092,35 @@ def publish_discovery():
             "payload_off": "OFF",
             "device": device_info_heaters,
         }),
-        ("switch", "pca_fan_1", {
-            "name": "Fan 1",
-            "unique_id": "pca_fan_1",
-            "command_topic": TOPIC_FAN_1_CMD,
-            "state_topic": TOPIC_FAN_1_STATE,
+        ("switch", "pca_led_red", {
+            "name": "RED LED",
+            "unique_id": "pca_led_red",
+            "command_topic": TOPIC_LED_RED_CMD,
+            "state_topic": TOPIC_LED_RED_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info_fans,
+            "device": device_info_leds,
         }),
-        ("switch", "pca_fan_2", {
-            "name": "Fan 2",
-            "unique_id": "pca_fan_2",
-            "command_topic": TOPIC_FAN_2_CMD,
-            "state_topic": TOPIC_FAN_2_STATE,
+        ("switch", "pca_led_blue", {
+            "name": "BLUE LED",
+            "unique_id": "pca_led_blue",
+            "command_topic": TOPIC_LED_BLUE_CMD,
+            "state_topic": TOPIC_LED_BLUE_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": device_info_fans,
+            "device": device_info_leds,
+        }),
+        ("switch", "pca_led_green", {
+            "name": "GREEN LED",
+            "unique_id": "pca_led_green",
+            "command_topic": TOPIC_LED_GREEN_CMD,
+            "state_topic": TOPIC_LED_GREEN_STATE,
+            "availability_topic": AVAIL_TOPIC,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device_info_leds,
         }),
         ("select", "pca_stepper_dir", {
             "name": "DIR",
@@ -749,29 +1164,166 @@ def publish_discovery():
             "mode": "slider",
             "device": device_info_stepper,
         }),
-        ("sensor", "bme280_temperature", {
-            "name": "Temperature",
-            "unique_id": "bme280_temperature",
-            "state_topic": TOPIC_BME_TEMP,
+        ("sensor", "pca9539_inputs", {
+            "name": "GPIO Feedback",
+            "unique_id": "pca9539_inputs",
+            "state_topic": TOPIC_PCA9539_INPUTS,
+            "value_template": "{{ value_json.hex }}",
+            "device": device_info_pca9539,
+        }),
+        # BME280 CH0 0x76
+        ("sensor", "bme280_ch0_0x76_temperature", {
+            "name": "Temperature CH0 0x76",
+            "unique_id": "bme280_ch0_0x76_temperature",
+            "state_topic": TOPIC_BME_CH0_76_TEMP,
             "unit_of_measurement": "°C",
             "device_class": "temperature",
-            "device": device_info_bme,
+            "device": device_info_bme_ch0_76,
         }),
-        ("sensor", "bme280_humidity", {
-            "name": "Humidity",
-            "unique_id": "bme280_humidity",
-            "state_topic": TOPIC_BME_HUM,
+        ("sensor", "bme280_ch0_0x76_humidity", {
+            "name": "Humidity CH0 0x76",
+            "unique_id": "bme280_ch0_0x76_humidity",
+            "state_topic": TOPIC_BME_CH0_76_HUM,
             "unit_of_measurement": "%",
             "device_class": "humidity",
-            "device": device_info_bme,
+            "device": device_info_bme_ch0_76,
         }),
-        ("sensor", "bme280_pressure", {
-            "name": "Pressure",
-            "unique_id": "bme280_pressure",
-            "state_topic": TOPIC_BME_PRESS,
+        ("sensor", "bme280_ch0_0x76_pressure", {
+            "name": "Pressure CH0 0x76",
+            "unique_id": "bme280_ch0_0x76_pressure",
+            "state_topic": TOPIC_BME_CH0_76_PRESS,
             "unit_of_measurement": "hPa",
             "device_class": "pressure",
-            "device": device_info_bme,
+            "device": device_info_bme_ch0_76,
+        }),
+        # BME280 CH0 0x77
+        ("sensor", "bme280_ch0_0x77_temperature", {
+            "name": "Temperature CH0 0x77",
+            "unique_id": "bme280_ch0_0x77_temperature",
+            "state_topic": TOPIC_BME_CH0_77_TEMP,
+            "unit_of_measurement": "°C",
+            "device_class": "temperature",
+            "device": device_info_bme_ch0_77,
+        }),
+        ("sensor", "bme280_ch0_0x77_humidity", {
+            "name": "Humidity CH0 0x77",
+            "unique_id": "bme280_ch0_0x77_humidity",
+            "state_topic": TOPIC_BME_CH0_77_HUM,
+            "unit_of_measurement": "%",
+            "device_class": "humidity",
+            "device": device_info_bme_ch0_77,
+        }),
+        ("sensor", "bme280_ch0_0x77_pressure", {
+            "name": "Pressure CH0 0x77",
+            "unique_id": "bme280_ch0_0x77_pressure",
+            "state_topic": TOPIC_BME_CH0_77_PRESS,
+            "unit_of_measurement": "hPa",
+            "device_class": "pressure",
+            "device": device_info_bme_ch0_77,
+        }),
+        # BME280 CH1 0x76
+        ("sensor", "bme280_ch1_0x76_temperature", {
+            "name": "Temperature CH1 0x76",
+            "unique_id": "bme280_ch1_0x76_temperature",
+            "state_topic": TOPIC_BME_CH1_76_TEMP,
+            "unit_of_measurement": "°C",
+            "device_class": "temperature",
+            "device": device_info_bme_ch1_76,
+        }),
+        ("sensor", "bme280_ch1_0x76_humidity", {
+            "name": "Humidity CH1 0x76",
+            "unique_id": "bme280_ch1_0x76_humidity",
+            "state_topic": TOPIC_BME_CH1_76_HUM,
+            "unit_of_measurement": "%",
+            "device_class": "humidity",
+            "device": device_info_bme_ch1_76,
+        }),
+        ("sensor", "bme280_ch1_0x76_pressure", {
+            "name": "Pressure CH1 0x76",
+            "unique_id": "bme280_ch1_0x76_pressure",
+            "state_topic": TOPIC_BME_CH1_76_PRESS,
+            "unit_of_measurement": "hPa",
+            "device_class": "pressure",
+            "device": device_info_bme_ch1_76,
+        }),
+        # Status Feedback (LEDs)
+        ("sensor", "status_ena", {
+            "name": "Status ENA",
+            "unique_id": "status_ena",
+            "state_topic": TOPIC_FEEDBACK_ENA,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_dir", {
+            "name": "Status DIR",
+            "unique_id": "status_dir",
+            "state_topic": TOPIC_FEEDBACK_DIR,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_pu", {
+            "name": "Status PU",
+            "unique_id": "status_pu",
+            "state_topic": TOPIC_FEEDBACK_PU,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_fan1", {
+            "name": "Status Fan 1",
+            "unique_id": "status_fan1",
+            "state_topic": TOPIC_FEEDBACK_FAN1,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_fan2", {
+            "name": "Status Fan 2",
+            "unique_id": "status_fan2",
+            "state_topic": TOPIC_FEEDBACK_FAN2,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_relay1", {
+            "name": "Status Relay 1",
+            "unique_id": "status_relay1",
+            "state_topic": TOPIC_FEEDBACK_RELAY1,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_relay2", {
+            "name": "Status Relay 2",
+            "unique_id": "status_relay2",
+            "state_topic": TOPIC_FEEDBACK_RELAY2,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_relay3", {
+            "name": "Status Relay 3",
+            "unique_id": "status_relay3",
+            "state_topic": TOPIC_FEEDBACK_RELAY3,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_relay4", {
+            "name": "Status Relay 4",
+            "unique_id": "status_relay4",
+            "state_topic": TOPIC_FEEDBACK_RELAY4,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_relay5", {
+            "name": "Status Relay 5",
+            "unique_id": "status_relay5",
+            "state_topic": TOPIC_FEEDBACK_RELAY5,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_relay6", {
+            "name": "Status Relay 6",
+            "unique_id": "status_relay6",
+            "state_topic": TOPIC_FEEDBACK_RELAY6,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_res3", {
+            "name": "Status RES3",
+            "unique_id": "status_res3",
+            "state_topic": TOPIC_RES3,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_res4", {
+            "name": "Status RES4",
+            "unique_id": "status_res4",
+            "state_topic": TOPIC_RES4,
+            "device": device_info_feedback,
         }),
     ]
 
@@ -783,12 +1335,17 @@ def publish_discovery():
 
     client.publish(TOPIC_PWM1_ENABLE_STATE, "OFF", retain=True)
     client.publish(TOPIC_PWM1_DUTY_STATE, "0", retain=True)
+    client.publish(TOPIC_FAN_1_POWER_STATE, "OFF", retain=True)
+    client.publish(TOPIC_PWM2_ENABLE_STATE, "OFF", retain=True)
+    client.publish(TOPIC_PWM2_DUTY_STATE, "0", retain=True)
+    client.publish(TOPIC_FAN_2_POWER_STATE, "OFF", retain=True)
     client.publish(TOPIC_HEATER_1_STATE, "OFF", retain=True)
     client.publish(TOPIC_HEATER_2_STATE, "OFF", retain=True)
     client.publish(TOPIC_HEATER_3_STATE, "OFF", retain=True)
     client.publish(TOPIC_HEATER_4_STATE, "OFF", retain=True)
-    client.publish(TOPIC_FAN_1_STATE, "OFF", retain=True)
-    client.publish(TOPIC_FAN_2_STATE, "OFF", retain=True)
+    client.publish(TOPIC_LED_RED_STATE, "OFF", retain=True)
+    client.publish(TOPIC_LED_BLUE_STATE, "OFF", retain=True)
+    client.publish(TOPIC_LED_GREEN_STATE, "OFF", retain=True)
     client.publish(TOPIC_STEPPER_DIR_STATE, stepper_dir, retain=True)
     client.publish(TOPIC_STEPPER_ENA_STATE, "OFF", retain=True)
     client.publish(TOPIC_PU_ENABLE_STATE, "OFF", retain=True)
@@ -805,12 +1362,17 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
     client.subscribe(TOPIC_PWM1_ENABLE_CMD)
     client.subscribe(TOPIC_PWM1_DUTY_CMD)
+    client.subscribe(TOPIC_FAN_1_POWER_CMD)
+    client.subscribe(TOPIC_PWM2_ENABLE_CMD)
+    client.subscribe(TOPIC_PWM2_DUTY_CMD)
+    client.subscribe(TOPIC_FAN_2_POWER_CMD)
     client.subscribe(TOPIC_HEATER_1_CMD)
     client.subscribe(TOPIC_HEATER_2_CMD)
     client.subscribe(TOPIC_HEATER_3_CMD)
     client.subscribe(TOPIC_HEATER_4_CMD)
-    client.subscribe(TOPIC_FAN_1_CMD)
-    client.subscribe(TOPIC_FAN_2_CMD)
+    client.subscribe(TOPIC_LED_RED_CMD)
+    client.subscribe(TOPIC_LED_BLUE_CMD)
+    client.subscribe(TOPIC_LED_GREEN_CMD)
     client.subscribe(TOPIC_STEPPER_DIR_CMD)
     client.subscribe(TOPIC_STEPPER_ENA_CMD)
     client.subscribe(TOPIC_PU_ENABLE_CMD)
@@ -826,8 +1388,10 @@ def _payload_to_bool(payload: str) -> bool:
 
 def on_message(client, userdata, msg):
     global pwm1_enabled, pwm1_value
+    global pwm2_enabled, pwm2_value
     global heater_1, heater_2, heater_3, heater_4
-    global fan_1, fan_2
+    global fan_1_power, fan_2_power
+    global led_red, led_blue, led_green
     global pu_enabled, pu_freq_hz
 
     topic = msg.topic
@@ -853,6 +1417,25 @@ def on_message(client, userdata, msg):
                 client.publish(TOPIC_PWM1_ENABLE_STATE, "ON" if pwm1_enabled else "OFF", retain=True)
                 client.publish(TOPIC_PWM1_DUTY_STATE, str(int(value)), retain=True)
 
+        elif topic == TOPIC_PWM2_ENABLE_CMD:
+            new_state = _payload_to_bool(payload)
+            with pwm2_lock:
+                if new_state and not pwm2_enabled:
+                    pwm2_value = float(DEFAULT_DUTY_CYCLE)
+                pwm2_enabled = new_state
+                update_pwm2_output_locked()
+                client.publish(TOPIC_PWM2_ENABLE_STATE, "ON" if pwm2_enabled else "OFF", retain=True)
+                client.publish(TOPIC_PWM2_DUTY_STATE, str(int(pwm2_value if pwm2_enabled else 0)), retain=True)
+
+        elif topic == TOPIC_PWM2_DUTY_CMD:
+            value = max(0.0, min(100.0, float(payload)))
+            with pwm2_lock:
+                pwm2_value = value
+                pwm2_enabled = value > 0.0
+                update_pwm2_output_locked()
+                client.publish(TOPIC_PWM2_ENABLE_STATE, "ON" if pwm2_enabled else "OFF", retain=True)
+                client.publish(TOPIC_PWM2_DUTY_STATE, str(int(value)), retain=True)
+
         elif topic == TOPIC_HEATER_1_CMD:
             heater_1 = _payload_to_bool(payload)
             apply_switch(CH_HEATER_1, heater_1)
@@ -873,15 +1456,30 @@ def on_message(client, userdata, msg):
             apply_switch(CH_HEATER_4, heater_4)
             client.publish(TOPIC_HEATER_4_STATE, "ON" if heater_4 else "OFF", retain=True)
 
-        elif topic == TOPIC_FAN_1_CMD:
-            fan_1 = _payload_to_bool(payload)
-            apply_switch(CH_FAN_1, fan_1)
-            client.publish(TOPIC_FAN_1_STATE, "ON" if fan_1 else "OFF", retain=True)
+        elif topic == TOPIC_FAN_1_POWER_CMD:
+            fan_1_power = _payload_to_bool(payload)
+            apply_switch(CH_FAN_1_POWER, fan_1_power)
+            client.publish(TOPIC_FAN_1_POWER_STATE, "ON" if fan_1_power else "OFF", retain=True)
 
-        elif topic == TOPIC_FAN_2_CMD:
-            fan_2 = _payload_to_bool(payload)
-            apply_switch(CH_FAN_2, fan_2)
-            client.publish(TOPIC_FAN_2_STATE, "ON" if fan_2 else "OFF", retain=True)
+        elif topic == TOPIC_FAN_2_POWER_CMD:
+            fan_2_power = _payload_to_bool(payload)
+            apply_switch(CH_FAN_2_POWER, fan_2_power)
+            client.publish(TOPIC_FAN_2_POWER_STATE, "ON" if fan_2_power else "OFF", retain=True)
+
+        elif topic == TOPIC_LED_RED_CMD:
+            led_red = _payload_to_bool(payload)
+            apply_switch(CH_LED_RED, led_red)
+            client.publish(TOPIC_LED_RED_STATE, "ON" if led_red else "OFF", retain=True)
+
+        elif topic == TOPIC_LED_BLUE_CMD:
+            led_blue = _payload_to_bool(payload)
+            apply_switch(CH_LED_BLUE, led_blue)
+            client.publish(TOPIC_LED_BLUE_STATE, "ON" if led_blue else "OFF", retain=True)
+
+        elif topic == TOPIC_LED_GREEN_CMD:
+            led_green = _payload_to_bool(payload)
+            apply_switch(CH_LED_GREEN, led_green)
+            client.publish(TOPIC_LED_GREEN_STATE, "ON" if led_green else "OFF", retain=True)
 
         elif topic == TOPIC_STEPPER_DIR_CMD:
             stepper_apply_dir(payload)
@@ -915,6 +1513,7 @@ client.on_message = on_message
 def safe_shutdown(signum=None, frame=None):
     try:
         bme_stop()
+        pca9539_stop()
         sys_led_stop()
         pu_stop()
 
@@ -923,21 +1522,32 @@ def safe_shutdown(signum=None, frame=None):
             pwm1_value = 0.0
             update_pwm1_output_locked()
 
+        with pwm2_lock:
+            pwm2_enabled = False
+            pwm2_value = 0.0
+            update_pwm2_output_locked()
+
         channel_off(CH_HEATER_1)
         channel_off(CH_HEATER_2)
         channel_off(CH_HEATER_3)
         channel_off(CH_HEATER_4)
-        channel_off(CH_FAN_1)
-        channel_off(CH_FAN_2)
+        channel_off(CH_FAN_1_POWER)
+        channel_off(CH_FAN_2_POWER)
         channel_off(CH_STEPPER_DIR)
         channel_off(CH_STEPPER_ENA)
         channel_off(CH_PU)
+        channel_off(CH_RESERVE1)
+        channel_off(CH_LED_RED)
+        channel_off(CH_LED_BLUE)
+        channel_off(CH_LED_GREEN)
         channel_off(CH_SYS_LED)
 
         client.publish(AVAIL_TOPIC, "offline", retain=True)
         client.loop_stop()
         client.disconnect()
-        pca.close()
+        if pca: pca.close()
+        if pca9539: pca9539.close()
+        if pca9540: pca9540.close()
 
     except Exception:
         logger.exception("Shutdown error")
@@ -966,6 +1576,7 @@ for attempt in range(1, 11):
 
 sys_led_start()
 bme_start()
+pca9539_start()
 
 logger.info("Service running")
 logger.setLevel(logging.ERROR)
