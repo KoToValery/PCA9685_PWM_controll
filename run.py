@@ -322,7 +322,6 @@ I2C_BUS = int(config.get("i2c_bus", 1))
 PCA_ADDR = int(config["pca_address"], 16)
 PCA9539_ADDR = int(config.get("pca9539_address", "0x74"), 16)
 PCA9540_ADDR = int(config.get("pca9540_address", "0x70"), 16)
-BME_ADDR = int(config.get("bme_address", "0x76"), 16)
 BME_INTERVAL = int(config.get("bme_interval", 60))
 PCA_FREQ = int(config.get("pca_frequency", 1000))
 
@@ -338,9 +337,6 @@ AVAIL_TOPIC = "homeassistant/pca9685_pwm/availability"
 def _topic(component: str, unique_id: str, suffix: str) -> str:
     return f"homeassistant/{component}/{unique_id}/{suffix}"
 
-
-TOPIC_PWM1_ENABLE_CMD = _topic("switch", "pca_pwm1_enable", "set")
-TOPIC_PWM1_ENABLE_STATE = _topic("switch", "pca_pwm1_enable", "state")
 
 TOPIC_PWM1_DUTY_CMD = _topic("number", "pca_pwm1_duty", "set")
 TOPIC_PWM1_DUTY_STATE = _topic("number", "pca_pwm1_duty", "state")
@@ -359,18 +355,8 @@ TOPIC_FAN_1_POWER_STATE = _topic("switch", "pca_fan_1_power", "state")
 TOPIC_FAN_2_POWER_CMD = _topic("switch", "pca_fan_2_power", "set")
 TOPIC_FAN_2_POWER_STATE = _topic("switch", "pca_fan_2_power", "state")
 
-TOPIC_PWM2_ENABLE_CMD = _topic("switch", "pca_pwm2_enable", "set")
-TOPIC_PWM2_ENABLE_STATE = _topic("switch", "pca_pwm2_enable", "state")
-
 TOPIC_PWM2_DUTY_CMD = _topic("number", "pca_pwm2_duty", "set")
 TOPIC_PWM2_DUTY_STATE = _topic("number", "pca_pwm2_duty", "state")
-
-TOPIC_LED_RED_CMD = _topic("switch", "pca_led_red", "set")
-TOPIC_LED_RED_STATE = _topic("switch", "pca_led_red", "state")
-TOPIC_LED_BLUE_CMD = _topic("switch", "pca_led_blue", "set")
-TOPIC_LED_BLUE_STATE = _topic("switch", "pca_led_blue", "state")
-TOPIC_LED_GREEN_CMD = _topic("switch", "pca_led_green", "set")
-TOPIC_LED_GREEN_STATE = _topic("switch", "pca_led_green", "state")
 
 TOPIC_STEPPER_DIR_CMD = _topic("select", "pca_stepper_dir", "set")
 TOPIC_STEPPER_DIR_STATE = _topic("select", "pca_stepper_dir", "state")
@@ -398,18 +384,18 @@ TOPIC_BME_CH1_76_PRESS = _topic("sensor", "bme280_ch1_0x76_pressure", "state")
 
 TOPIC_PCA9539_INPUTS = "homeassistant/sensor/pca9539_inputs/state"
 
-# Feedback status topics (LEDs)
-TOPIC_FEEDBACK_ENA = _topic("sensor", "status_ena", "state")
-TOPIC_FEEDBACK_DIR = _topic("sensor", "status_dir", "state")
-TOPIC_FEEDBACK_PU = _topic("sensor", "status_pu", "state")
-TOPIC_FEEDBACK_FAN1 = _topic("sensor", "status_fan1", "state")
-TOPIC_FEEDBACK_FAN2 = _topic("sensor", "status_fan2", "state")
-TOPIC_FEEDBACK_RELAY1 = _topic("sensor", "status_relay1", "state")
-TOPIC_FEEDBACK_RELAY2 = _topic("sensor", "status_relay2", "state")
-TOPIC_FEEDBACK_RELAY3 = _topic("sensor", "status_relay3", "state")
-TOPIC_FEEDBACK_RELAY4 = _topic("sensor", "status_relay4", "state")
-TOPIC_FEEDBACK_RELAY5 = _topic("sensor", "status_relay5", "state")
-TOPIC_FEEDBACK_RELAY6 = _topic("sensor", "status_relay6", "state")
+# Feedback status topics (Binary sensors)
+TOPIC_FEEDBACK_ENA = _topic("binary_sensor", "status_ena", "state")
+TOPIC_FEEDBACK_DIR = _topic("binary_sensor", "status_dir", "state")
+TOPIC_FEEDBACK_PU = _topic("binary_sensor", "status_pu", "state")
+TOPIC_FEEDBACK_FAN1 = _topic("binary_sensor", "status_fan1", "state")
+TOPIC_FEEDBACK_FAN2 = _topic("binary_sensor", "status_fan2", "state")
+TOPIC_FEEDBACK_RELAY1 = _topic("binary_sensor", "status_relay1", "state")
+TOPIC_FEEDBACK_RELAY2 = _topic("binary_sensor", "status_relay2", "state")
+TOPIC_FEEDBACK_RELAY3 = _topic("binary_sensor", "status_relay3", "state")
+TOPIC_FEEDBACK_RELAY4 = _topic("binary_sensor", "status_relay4", "state")
+TOPIC_FEEDBACK_RELAY5 = _topic("binary_sensor", "status_relay5", "state")
+TOPIC_FEEDBACK_RELAY6 = _topic("binary_sensor", "status_relay6", "state")
 
 TOPIC_RES2 = _topic("sensor", "status_res2", "state")
 TOPIC_RES3 = _topic("sensor", "status_res3", "state")
@@ -515,11 +501,9 @@ bme_ch0_77 = init_bme(PCA9540B.CH0, 0x77, "CH0")
 bme_ch1_76 = init_bme(PCA9540B.CH1, 0x76, "CH1")
 
 
-pwm1_enabled = False
 pwm1_value = 0.0
 pwm1_lock = threading.Lock()
 
-pwm2_enabled = False
 pwm2_value = 0.0
 pwm2_lock = threading.Lock()
 
@@ -529,10 +513,6 @@ heater_3 = False
 heater_4 = False
 fan_1_power = False
 fan_2_power = False
-
-led_red = False
-led_blue = False
-led_green = False
 
 stepper_dir = "CW"
 stepper_ena = False
@@ -564,25 +544,17 @@ def pca9539_worker():
     global fan_1_power, fan_2_power
     global stepper_ena, stepper_dir
     global pu_enabled
-    global pwm1_enabled, pwm2_enabled
+    global pwm1_value, pwm2_value
 
     last_inputs = None
     
     # Pulse detection state
-    # We'll store a history of the last 3 states for pulsing signals
     taxo1_history = []
     taxo2_history = []
     pu_history = []
     
-    # Initial status: Blue (Initialization)
-    feedback_topics = [
-        TOPIC_FEEDBACK_ENA, TOPIC_FEEDBACK_DIR, TOPIC_FEEDBACK_PU,
-        TOPIC_FEEDBACK_FAN1, TOPIC_FEEDBACK_FAN2,
-        TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY3,
-        TOPIC_FEEDBACK_RELAY4, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6
-    ]
-    for topic in feedback_topics:
-        client.publish(topic, "blue", retain=True)
+    # LED control state
+    led_blink_state = False
 
     while pca9539_running:
         if pca9539:
@@ -593,10 +565,10 @@ def pca9539_worker():
                     last_inputs = inputs
                 
                 # Feedback Logic
-                # IO0: 0-5 Relays, 6-7 TAXO
-                # IO1: 0 ENA, 1 DIR, 2 PU, 4 RES4, 5 RES3
+                # ON (Problem) if actual doesn't match expected, OFF (No Problem) otherwise
+                any_problem = False
 
-                # Relays (IO0_0 to IO0_5) - High=OFF (1), Low=ON (0)
+                # Relays (IO0_0 to IO0_5)
                 relays_states = [heater_1, heater_2, heater_3, heater_4, fan_1_power, fan_2_power]
                 relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY3, 
                                 TOPIC_FEEDBACK_RELAY4, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
@@ -604,49 +576,40 @@ def pca9539_worker():
                 for i in range(6):
                     expected_on = relays_states[i]
                     actual_bit = (inputs >> i) & 1
-                    # If expected ON, bit should be 0. If expected OFF, bit should be 1.
                     is_ok = (expected_on == (actual_bit == 0))
-                    client.publish(relay_topics[i], "green" if is_ok else "red", retain=True)
+                    if not is_ok: any_problem = True
+                    client.publish(relay_topics[i], "ON" if not is_ok else "OFF", retain=True)
 
-                # Stepper (IO1_0 to IO1_2 -> bits 8 to 10)
-                # ENA (IO1_0)
+                # Stepper
                 ena_actual = (inputs >> 8) & 1
                 ena_ok = (stepper_ena == (ena_actual == 1))
-                client.publish(TOPIC_FEEDBACK_ENA, "green" if ena_ok else "red", retain=True)
+                if not ena_ok: any_problem = True
+                client.publish(TOPIC_FEEDBACK_ENA, "ON" if not ena_ok else "OFF", retain=True)
 
-                # DIR (IO1_1)
                 dir_actual = (inputs >> 9) & 1
                 dir_expected_high = (stepper_dir == "CW")
                 dir_ok = (dir_expected_high == (dir_actual == 1))
-                client.publish(TOPIC_FEEDBACK_DIR, "green" if dir_ok else "red", retain=True)
+                if not dir_ok: any_problem = True
+                client.publish(TOPIC_FEEDBACK_DIR, "ON" if not dir_ok else "OFF", retain=True)
 
-                # PU (IO1_2) - This is a pulse.
+                # PU
                 pu_actual = (inputs >> 10) & 1
                 if not pu_enabled:
                     pu_ok = (pu_actual == 0)
                 else:
-                    # Check if pulsing: bit should change over time
                     pu_history.append(pu_actual)
                     if len(pu_history) > 5: pu_history.pop(0)
-                    # If all readings in history are the same, it's stuck
                     if len(pu_history) >= 3 and all(x == pu_history[0] for x in pu_history):
                         pu_ok = False
                     else:
                         pu_ok = True
-                client.publish(TOPIC_FEEDBACK_PU, "green" if pu_ok else "red", retain=True)
+                if not pu_ok: any_problem = True
+                client.publish(TOPIC_FEEDBACK_PU, "ON" if not pu_ok else "OFF", retain=True)
 
-                # Reserve inputs IO1_4 (RES4), IO1_5 (RES3), IO1_6 (RES2)
-                res4_actual = (inputs >> 12) & 1
-                res3_actual = (inputs >> 13) & 1
-                res2_actual = (inputs >> 14) & 1
-                client.publish(TOPIC_RES4, "ON" if res4_actual == 1 else "OFF", retain=True)
-                client.publish(TOPIC_RES3, "ON" if res3_actual == 1 else "OFF", retain=True)
-                client.publish(TOPIC_RES2, "ON" if res2_actual == 1 else "OFF", retain=True)
-
-                # Fans TAXO (IO0_6, IO0_7)
+                # Fans
                 # Fan 1 (PWM1)
                 taxo1_actual = (inputs >> 6) & 1
-                if pwm1_enabled:
+                if pwm1_value > 0.0:
                     taxo1_history.append(taxo1_actual)
                     if len(taxo1_history) > 5: taxo1_history.pop(0)
                     if len(taxo1_history) >= 3 and all(x == taxo1_history[0] for x in taxo1_history):
@@ -655,12 +618,13 @@ def pca9539_worker():
                         fan1_ok = True
                 else:
                     taxo1_history = []
-                    fan1_ok = (taxo1_actual == 1) # Pullup
-                client.publish(TOPIC_FEEDBACK_FAN1, "green" if fan1_ok else "red", retain=True)
+                    fan1_ok = (taxo1_actual == 1)
+                if not fan1_ok: any_problem = True
+                client.publish(TOPIC_FEEDBACK_FAN1, "ON" if not fan1_ok else "OFF", retain=True)
 
                 # Fan 2 (PWM2)
                 taxo2_actual = (inputs >> 7) & 1
-                if pwm2_enabled:
+                if pwm2_value > 0.0:
                     taxo2_history.append(taxo2_actual)
                     if len(taxo2_history) > 5: taxo2_history.pop(0)
                     if len(taxo2_history) >= 3 and all(x == taxo2_history[0] for x in taxo2_history):
@@ -670,7 +634,33 @@ def pca9539_worker():
                 else:
                     taxo2_history = []
                     fan2_ok = (taxo2_actual == 1)
-                client.publish(TOPIC_FEEDBACK_FAN2, "green" if fan2_ok else "red", retain=True)
+                if not fan2_ok: any_problem = True
+                client.publish(TOPIC_FEEDBACK_FAN2, "ON" if not fan2_ok else "OFF", retain=True)
+
+                # Reserve inputs
+                res4_actual = (inputs >> 12) & 1
+                res3_actual = (inputs >> 13) & 1
+                res2_actual = (inputs >> 14) & 1
+                client.publish(TOPIC_RES4, "ON" if res4_actual == 1 else "OFF", retain=True)
+                client.publish(TOPIC_RES3, "ON" if res3_actual == 1 else "OFF", retain=True)
+                client.publish(TOPIC_RES2, "ON" if res2_actual == 1 else "OFF", retain=True)
+
+                # Automatic LED control
+                if any_problem:
+                    # Blink RED, turn off GREEN
+                    led_blink_state = not led_blink_state
+                    if led_blink_state:
+                        channel_on(CH_LED_RED)
+                    else:
+                        channel_off(CH_LED_RED)
+                    channel_off(CH_LED_GREEN)
+                else:
+                    # Turn on GREEN, turn off RED
+                    channel_on(CH_LED_GREEN)
+                    channel_off(CH_LED_RED)
+                
+                # BLUE LED is dropped
+                channel_off(CH_LED_BLUE)
 
             except Exception as e:
                 logger.error("PCA9539 read error: %s", e)
@@ -776,11 +766,7 @@ def bme_stop():
 
 
 def update_pwm1_output_locked():
-    global pwm1_enabled, pwm1_value
-
-    if not pwm1_enabled:
-        pca.set_duty_12bit(CH_PWM1, 4095)
-        return
+    global pwm1_value
 
     visual = float(pwm1_value)
     if visual == 0.0:
@@ -796,11 +782,7 @@ def update_pwm1_output_locked():
 
 
 def update_pwm2_output_locked():
-    global pwm2_enabled, pwm2_value
-
-    if not pwm2_enabled:
-        pca.set_duty_12bit(CH_PWM2, 4095)
-        return
+    global pwm2_value
 
     visual = float(pwm2_value)
     if visual == 0.0:
@@ -1016,16 +998,6 @@ device_info_feedback = {
 
 def publish_discovery():
     discoveries = [
-        ("switch", "pca_pwm1_enable", {
-            "name": "FAN 1 Speed Enable",
-            "unique_id": "pca_pwm1_enable",
-            "command_topic": TOPIC_PWM1_ENABLE_CMD,
-            "state_topic": TOPIC_PWM1_ENABLE_STATE,
-            "availability_topic": AVAIL_TOPIC,
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "device": device_info_fans,
-        }),
         ("number", "pca_pwm1_duty", {
             "name": "FAN 1 Speed Duty",
             "unique_id": "pca_pwm1_duty",
@@ -1044,16 +1016,6 @@ def publish_discovery():
             "unique_id": "pca_fan_1_power",
             "command_topic": TOPIC_FAN_1_POWER_CMD,
             "state_topic": TOPIC_FAN_1_POWER_STATE,
-            "availability_topic": AVAIL_TOPIC,
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "device": device_info_fans,
-        }),
-        ("switch", "pca_pwm2_enable", {
-            "name": "FAN 2 Speed Enable",
-            "unique_id": "pca_pwm2_enable",
-            "command_topic": TOPIC_PWM2_ENABLE_CMD,
-            "state_topic": TOPIC_PWM2_ENABLE_STATE,
             "availability_topic": AVAIL_TOPIC,
             "payload_on": "ON",
             "payload_off": "OFF",
@@ -1121,36 +1083,6 @@ def publish_discovery():
             "payload_on": "ON",
             "payload_off": "OFF",
             "device": device_info_heaters,
-        }),
-        ("switch", "pca_led_red", {
-            "name": "RED LED",
-            "unique_id": "pca_led_red",
-            "command_topic": TOPIC_LED_RED_CMD,
-            "state_topic": TOPIC_LED_RED_STATE,
-            "availability_topic": AVAIL_TOPIC,
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "device": device_info_leds,
-        }),
-        ("switch", "pca_led_blue", {
-            "name": "BLUE LED",
-            "unique_id": "pca_led_blue",
-            "command_topic": TOPIC_LED_BLUE_CMD,
-            "state_topic": TOPIC_LED_BLUE_STATE,
-            "availability_topic": AVAIL_TOPIC,
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "device": device_info_leds,
-        }),
-        ("switch", "pca_led_green", {
-            "name": "GREEN LED",
-            "unique_id": "pca_led_green",
-            "command_topic": TOPIC_LED_GREEN_CMD,
-            "state_topic": TOPIC_LED_GREEN_STATE,
-            "availability_topic": AVAIL_TOPIC,
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "device": device_info_leds,
         }),
         ("select", "pca_stepper_dir", {
             "name": "DIR",
@@ -1276,71 +1208,82 @@ def publish_discovery():
             "device_class": "pressure",
             "device": device_info_bme_ch1_76,
         }),
-        # Status Feedback (LEDs)
-        ("sensor", "status_ena", {
+        # Status Feedback (Binary sensors)
+        ("binary_sensor", "status_ena", {
             "name": "Status ENA",
             "unique_id": "status_ena",
             "state_topic": TOPIC_FEEDBACK_ENA,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_dir", {
+        ("binary_sensor", "status_dir", {
             "name": "Status DIR",
             "unique_id": "status_dir",
             "state_topic": TOPIC_FEEDBACK_DIR,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_pu", {
+        ("binary_sensor", "status_pu", {
             "name": "Status PU",
             "unique_id": "status_pu",
             "state_topic": TOPIC_FEEDBACK_PU,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_fan1", {
+        ("binary_sensor", "status_fan1", {
             "name": "Status Fan 1",
             "unique_id": "status_fan1",
             "state_topic": TOPIC_FEEDBACK_FAN1,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_fan2", {
+        ("binary_sensor", "status_fan2", {
             "name": "Status Fan 2",
             "unique_id": "status_fan2",
             "state_topic": TOPIC_FEEDBACK_FAN2,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_relay1", {
+        ("binary_sensor", "status_relay1", {
             "name": "Status Relay 1",
             "unique_id": "status_relay1",
             "state_topic": TOPIC_FEEDBACK_RELAY1,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_relay2", {
+        ("binary_sensor", "status_relay2", {
             "name": "Status Relay 2",
             "unique_id": "status_relay2",
             "state_topic": TOPIC_FEEDBACK_RELAY2,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_relay3", {
+        ("binary_sensor", "status_relay3", {
             "name": "Status Relay 3",
             "unique_id": "status_relay3",
             "state_topic": TOPIC_FEEDBACK_RELAY3,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_relay4", {
+        ("binary_sensor", "status_relay4", {
             "name": "Status Relay 4",
             "unique_id": "status_relay4",
             "state_topic": TOPIC_FEEDBACK_RELAY4,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_relay5", {
+        ("binary_sensor", "status_relay5", {
             "name": "Status Relay 5",
             "unique_id": "status_relay5",
             "state_topic": TOPIC_FEEDBACK_RELAY5,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
-        ("sensor", "status_relay6", {
+        ("binary_sensor", "status_relay6", {
             "name": "Status Relay 6",
             "unique_id": "status_relay6",
             "state_topic": TOPIC_FEEDBACK_RELAY6,
+            "device_class": "problem",
             "device": device_info_feedback,
         }),
         ("sensor", "status_res2", {
@@ -1369,19 +1312,14 @@ def publish_discovery():
 
     client.publish(AVAIL_TOPIC, "online", retain=True)
 
-    client.publish(TOPIC_PWM1_ENABLE_STATE, "OFF", retain=True)
     client.publish(TOPIC_PWM1_DUTY_STATE, "0", retain=True)
     client.publish(TOPIC_FAN_1_POWER_STATE, "OFF", retain=True)
-    client.publish(TOPIC_PWM2_ENABLE_STATE, "OFF", retain=True)
     client.publish(TOPIC_PWM2_DUTY_STATE, "0", retain=True)
     client.publish(TOPIC_FAN_2_POWER_STATE, "OFF", retain=True)
     client.publish(TOPIC_HEATER_1_STATE, "OFF", retain=True)
     client.publish(TOPIC_HEATER_2_STATE, "OFF", retain=True)
     client.publish(TOPIC_HEATER_3_STATE, "OFF", retain=True)
     client.publish(TOPIC_HEATER_4_STATE, "OFF", retain=True)
-    client.publish(TOPIC_LED_RED_STATE, "OFF", retain=True)
-    client.publish(TOPIC_LED_BLUE_STATE, "OFF", retain=True)
-    client.publish(TOPIC_LED_GREEN_STATE, "OFF", retain=True)
     client.publish(TOPIC_STEPPER_DIR_STATE, stepper_dir, retain=True)
     client.publish(TOPIC_STEPPER_ENA_STATE, "OFF", retain=True)
     client.publish(TOPIC_PU_ENABLE_STATE, "OFF", retain=True)
@@ -1396,19 +1334,14 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         logger.error("MQTT connection failed with code %s", rc)
         return
 
-    client.subscribe(TOPIC_PWM1_ENABLE_CMD)
     client.subscribe(TOPIC_PWM1_DUTY_CMD)
     client.subscribe(TOPIC_FAN_1_POWER_CMD)
-    client.subscribe(TOPIC_PWM2_ENABLE_CMD)
     client.subscribe(TOPIC_PWM2_DUTY_CMD)
     client.subscribe(TOPIC_FAN_2_POWER_CMD)
     client.subscribe(TOPIC_HEATER_1_CMD)
     client.subscribe(TOPIC_HEATER_2_CMD)
     client.subscribe(TOPIC_HEATER_3_CMD)
     client.subscribe(TOPIC_HEATER_4_CMD)
-    client.subscribe(TOPIC_LED_RED_CMD)
-    client.subscribe(TOPIC_LED_BLUE_CMD)
-    client.subscribe(TOPIC_LED_GREEN_CMD)
     client.subscribe(TOPIC_STEPPER_DIR_CMD)
     client.subscribe(TOPIC_STEPPER_ENA_CMD)
     client.subscribe(TOPIC_PU_ENABLE_CMD)
@@ -1423,53 +1356,28 @@ def _payload_to_bool(payload: str) -> bool:
 
 
 def on_message(client, userdata, msg):
-    global pwm1_enabled, pwm1_value
-    global pwm2_enabled, pwm2_value
+    global pwm1_value
+    global pwm2_value
     global heater_1, heater_2, heater_3, heater_4
     global fan_1_power, fan_2_power
-    global led_red, led_blue, led_green
     global pu_enabled, pu_freq_hz
 
     topic = msg.topic
     payload = msg.payload.decode("utf-8").strip()
 
     try:
-        if topic == TOPIC_PWM1_ENABLE_CMD:
-            new_state = _payload_to_bool(payload)
-            with pwm1_lock:
-                if new_state and not pwm1_enabled:
-                    pwm1_value = float(DEFAULT_DUTY_CYCLE)
-                pwm1_enabled = new_state
-                update_pwm1_output_locked()
-                client.publish(TOPIC_PWM1_ENABLE_STATE, "ON" if pwm1_enabled else "OFF", retain=True)
-                client.publish(TOPIC_PWM1_DUTY_STATE, str(int(pwm1_value if pwm1_enabled else 0)), retain=True)
-
-        elif topic == TOPIC_PWM1_DUTY_CMD:
+        if topic == TOPIC_PWM1_DUTY_CMD:
             value = max(0.0, min(100.0, float(payload)))
             with pwm1_lock:
                 pwm1_value = value
-                pwm1_enabled = value > 0.0
                 update_pwm1_output_locked()
-                client.publish(TOPIC_PWM1_ENABLE_STATE, "ON" if pwm1_enabled else "OFF", retain=True)
                 client.publish(TOPIC_PWM1_DUTY_STATE, str(int(value)), retain=True)
-
-        elif topic == TOPIC_PWM2_ENABLE_CMD:
-            new_state = _payload_to_bool(payload)
-            with pwm2_lock:
-                if new_state and not pwm2_enabled:
-                    pwm2_value = float(DEFAULT_DUTY_CYCLE)
-                pwm2_enabled = new_state
-                update_pwm2_output_locked()
-                client.publish(TOPIC_PWM2_ENABLE_STATE, "ON" if pwm2_enabled else "OFF", retain=True)
-                client.publish(TOPIC_PWM2_DUTY_STATE, str(int(pwm2_value if pwm2_enabled else 0)), retain=True)
 
         elif topic == TOPIC_PWM2_DUTY_CMD:
             value = max(0.0, min(100.0, float(payload)))
             with pwm2_lock:
                 pwm2_value = value
-                pwm2_enabled = value > 0.0
                 update_pwm2_output_locked()
-                client.publish(TOPIC_PWM2_ENABLE_STATE, "ON" if pwm2_enabled else "OFF", retain=True)
                 client.publish(TOPIC_PWM2_DUTY_STATE, str(int(value)), retain=True)
 
         elif topic == TOPIC_HEATER_1_CMD:
@@ -1501,21 +1409,6 @@ def on_message(client, userdata, msg):
             fan_2_power = _payload_to_bool(payload)
             apply_switch(CH_FAN_2_POWER, fan_2_power)
             client.publish(TOPIC_FAN_2_POWER_STATE, "ON" if fan_2_power else "OFF", retain=True)
-
-        elif topic == TOPIC_LED_RED_CMD:
-            led_red = _payload_to_bool(payload)
-            apply_switch(CH_LED_RED, led_red)
-            client.publish(TOPIC_LED_RED_STATE, "ON" if led_red else "OFF", retain=True)
-
-        elif topic == TOPIC_LED_BLUE_CMD:
-            led_blue = _payload_to_bool(payload)
-            apply_switch(CH_LED_BLUE, led_blue)
-            client.publish(TOPIC_LED_BLUE_STATE, "ON" if led_blue else "OFF", retain=True)
-
-        elif topic == TOPIC_LED_GREEN_CMD:
-            led_green = _payload_to_bool(payload)
-            apply_switch(CH_LED_GREEN, led_green)
-            client.publish(TOPIC_LED_GREEN_STATE, "ON" if led_green else "OFF", retain=True)
 
         elif topic == TOPIC_STEPPER_DIR_CMD:
             stepper_apply_dir(payload)
@@ -1554,12 +1447,10 @@ def safe_shutdown(signum=None, frame=None):
         pu_stop()
 
         with pwm1_lock:
-            pwm1_enabled = False
             pwm1_value = 0.0
             update_pwm1_output_locked()
 
         with pwm2_lock:
-            pwm2_enabled = False
             pwm2_value = 0.0
             update_pwm2_output_locked()
 

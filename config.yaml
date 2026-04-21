@@ -1,8 +1,8 @@
 name: "PCA9685 PWM Controller"
-version: "0.1.12"
+version: "0.1.13"
 slug: "pca9685_pwm"
-description: "Control PCA9685 PWM board via MQTT for motors, LEDs and relays"
-description: "Fixed-channel PCA9685 controller via MQTT Discovery (PWM, heaters, fans, stepper control)"
+
+description: " PCA9685 controller via MQTT Discovery (PWM, heaters, fans, stepper control)"
 init: false
 arch:
   - aarch64
@@ -32,7 +32,7 @@ options:
   pca_address: "0x40"
   pca9539_address: "0x74"
   pca9540_address: "0x70"
-  bme_address: "0x76"
+  i2c_bus: 1
   bme_interval: 60
   pca_frequency: 1000
   default_duty_cycle: 30
@@ -45,7 +45,7 @@ schema:
   pca_address: match(^0x[0-9A-Fa-f]{2}$)
   pca9539_address: match(^0x[0-9A-Fa-f]{2}$)?
   pca9540_address: match(^0x[0-9A-Fa-f]{2}$)?
-  bme_address: match(^0x[0-9A-Fa-f]{2}$)?
+  i2c_bus: int(0,10)?
   bme_interval: int(1,3600)?
   pca_frequency: int(24,1526)
   default_duty_cycle: int(0,100)
