@@ -1372,6 +1372,13 @@ def on_message(client, userdata, msg):
                 pwm1_value = value
                 update_pwm1_output_locked()
                 client.publish(TOPIC_PWM1_DUTY_STATE, str(int(value)), retain=True)
+            
+            # Auto control Fan Power based on Speed
+            new_power = value > 0.0
+            if new_power != fan_1_power:
+                fan_1_power = new_power
+                apply_switch(CH_FAN_1_POWER, fan_1_power)
+                client.publish(TOPIC_FAN_1_POWER_STATE, "ON" if fan_1_power else "OFF", retain=True)
 
         elif topic == TOPIC_PWM2_DUTY_CMD:
             value = max(0.0, min(100.0, float(payload)))
@@ -1379,6 +1386,13 @@ def on_message(client, userdata, msg):
                 pwm2_value = value
                 update_pwm2_output_locked()
                 client.publish(TOPIC_PWM2_DUTY_STATE, str(int(value)), retain=True)
+            
+            # Auto control Fan Power based on Speed
+            new_power = value > 0.0
+            if new_power != fan_2_power:
+                fan_2_power = new_power
+                apply_switch(CH_FAN_2_POWER, fan_2_power)
+                client.publish(TOPIC_FAN_2_POWER_STATE, "ON" if fan_2_power else "OFF", retain=True)
 
         elif topic == TOPIC_HEATER_1_CMD:
             heater_1 = _payload_to_bool(payload)
@@ -1404,11 +1418,31 @@ def on_message(client, userdata, msg):
             fan_1_power = _payload_to_bool(payload)
             apply_switch(CH_FAN_1_POWER, fan_1_power)
             client.publish(TOPIC_FAN_1_POWER_STATE, "ON" if fan_1_power else "OFF", retain=True)
+            
+            # Sync Speed with Power
+            with pwm1_lock:
+                if fan_1_power:
+                    if pwm1_value == 0:
+                        pwm1_value = float(DEFAULT_DUTY_CYCLE)
+                else:
+                    pwm1_value = 0.0
+                update_pwm1_output_locked()
+                client.publish(TOPIC_PWM1_DUTY_STATE, str(int(pwm1_value)), retain=True)
 
         elif topic == TOPIC_FAN_2_POWER_CMD:
             fan_2_power = _payload_to_bool(payload)
             apply_switch(CH_FAN_2_POWER, fan_2_power)
             client.publish(TOPIC_FAN_2_POWER_STATE, "ON" if fan_2_power else "OFF", retain=True)
+
+            # Sync Speed with Power
+            with pwm2_lock:
+                if fan_2_power:
+                    if pwm2_value == 0:
+                        pwm2_value = float(DEFAULT_DUTY_CYCLE)
+                else:
+                    pwm2_value = 0.0
+                update_pwm2_output_locked()
+                client.publish(TOPIC_PWM2_DUTY_STATE, str(int(pwm2_value)), retain=True)
 
         elif topic == TOPIC_STEPPER_DIR_CMD:
             stepper_apply_dir(payload)
