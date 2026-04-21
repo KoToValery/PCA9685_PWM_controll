@@ -29,9 +29,21 @@ logger.setLevel(logging.INFO)
 # --- Kernel Module Check ---
 try:
     logger.info("Checking i2c-dev module...")
-    subprocess.run(["modprobe", "i2c-dev"], check=False)
+    subprocess.run(["modprobe", "i2c-dev"], check=True)
+except subprocess.CalledProcessError as e:
+    logger.error("Failed to load i2c-dev module: %s", e)
+    sys.exit(1)
 except Exception as e:
     logger.warning("Failed to run modprobe i2c-dev: %s", e)
+
+# Global I2C synchronization
+I2C_BUS = 1
+i2c_lock = threading.Lock()
+try:
+    shared_bus = SMBus(I2C_BUS)
+except Exception as e:
+    logger.error("Failed to open I2C bus %d: %s", I2C_BUS, e)
+    sys.exit(1)
 
 MODE1 = 0x00
 MODE2 = 0x01
@@ -47,18 +59,16 @@ OSC_HZ = 25_000_000
 
 
 class PCA9685:
-    def __init__(self, bus_num: int, address: int):
+    def __init__(self, bus: SMBus, address: int):
         self.address = address
-        self.bus = SMBus(bus_num)
-        self._write8(MODE1, MODE1_AI)
-        self._write8(MODE2, MODE2_OUTDRV)
+        self.bus = bus
+        with i2c_lock:
+            self._write8(MODE1, MODE1_AI)
+            self._write8(MODE2, MODE2_OUTDRV)
         time.sleep(0.01)
 
     def close(self):
-        try:
-            self.bus.close()
-        except Exception:
-            pass
+        pass
 
     def _write8(self, reg, val):
         self.bus.write_byte_data(self.address, reg, val & 0xFF)
@@ -69,16 +79,17 @@ class PCA9685:
     def set_pwm_freq(self, freq_hz: float):
         prescale = int(round(OSC_HZ / (4096.0 * float(freq_hz)) - 1.0))
         prescale = max(3, min(255, prescale))
-        oldmode = self._read8(MODE1)
-        sleepmode = (oldmode & 0x7F) | MODE1_SLEEP
-        self._write8(MODE1, sleepmode)
-        time.sleep(0.005)
-        self._write8(PRESCALE, prescale)
-        time.sleep(0.005)
-        self._write8(MODE1, oldmode)
-        time.sleep(0.005)
-        self._write8(MODE1, oldmode | MODE1_RESTART | MODE1_AI)
-        time.sleep(0.005)
+        with i2c_lock:
+            oldmode = self._read8(MODE1)
+            sleepmode = (oldmode & 0x7F) | MODE1_SLEEP
+            self._write8(MODE1, sleepmode)
+            time.sleep(0.005)
+            self._write8(PRESCALE, prescale)
+            time.sleep(0.005)
+            self._write8(MODE1, oldmode)
+            time.sleep(0.005)
+            self._write8(MODE1, oldmode | MODE1_RESTART | MODE1_AI)
+            time.sleep(0.005)
 
     def set_pwm(self, channel: int, on: int, off: int):
         channel = int(channel)
@@ -89,7 +100,8 @@ class PCA9685:
 
         reg = LED0_ON_L + 4 * channel
         data = [on & 0xFF, (on >> 8) & 0xFF, off & 0xFF, (off >> 8) & 0xFF]
-        self.bus.write_i2c_block_data(self.address, reg, data)
+        with i2c_lock:
+            self.bus.write_i2c_block_data(self.address, reg, data)
 
     def set_duty_12bit(self, channel: int, duty: int):
         duty = int(max(0, min(4095, duty)))
@@ -105,24 +117,23 @@ class PCA9539:
     CONFIG0 = 0x06
     CONFIG1 = 0x07
 
-    def __init__(self, bus_num: int, address: int):
+    def __init__(self, bus: SMBus, address: int):
         self.address = address
-        self.bus = SMBus(bus_num)
+        self.bus = bus
         # Configure all pins as inputs by default (1 = Input, 0 = Output)
-        self.bus.write_byte_data(self.address, self.CONFIG0, 0xFF)
-        self.bus.write_byte_data(self.address, self.CONFIG1, 0xFF)
+        with i2c_lock:
+            self.bus.write_byte_data(self.address, self.CONFIG0, 0xFF)
+            self.bus.write_byte_data(self.address, self.CONFIG1, 0xFF)
 
     def read_inputs(self):
         """Read all 16 pins. Returns a 16-bit integer."""
-        low = self.bus.read_byte_data(self.address, self.INPUT0)
-        high = self.bus.read_byte_data(self.address, self.INPUT1)
+        with i2c_lock:
+            low = self.bus.read_byte_data(self.address, self.INPUT0)
+            high = self.bus.read_byte_data(self.address, self.INPUT1)
         return (high << 8) | low
 
     def close(self):
-        try:
-            self.bus.close()
-        except Exception:
-            pass
+        pass
 
 
 class PCA9540B:
@@ -131,37 +142,40 @@ class PCA9540B:
     CH0 = 0x04
     CH1 = 0x05
 
-    def __init__(self, bus_num: int, address: int):
+    def __init__(self, bus: SMBus, address: int):
         self.address = address
-        self.bus = SMBus(bus_num)
+        self.bus = bus
 
     def select_channel(self, channel_code: int):
         """Select channel: 0x04 for CH0, 0x05 for CH1, 0x00 for none."""
-        self.bus.write_byte(self.address, channel_code)
+        with i2c_lock:
+            self.bus.write_byte(self.address, channel_code)
+
+    def deselect_channels(self):
+        """Deselect all channels."""
+        self.select_channel(self.CH_NONE)
 
     def close(self):
-        try:
-            self.bus.close()
-        except Exception:
-            pass
+        pass
 
 
 class BME280:
-    def __init__(self, bus_num: int, address: int = 0x76):
+    def __init__(self, bus: SMBus, address: int = 0x76):
         self.address = address
-        self.bus = SMBus(bus_num)
+        self.bus = bus
         self.cal = {}
         # Check Chip ID (BME280 = 0x60, BMP280 = 0x58)
-        chip_id = self.bus.read_byte_data(self.address, 0xD0)
-        if chip_id not in [0x60, 0x58]:
-            raise RuntimeError(f"Unexpected Chip ID: {hex(chip_id)}. Expected 0x60 or 0x58.")
-        self.is_bme = (chip_id == 0x60)
-        self._load_calibration()
-        # Initialize sensor
-        if self.is_bme:
-            self.bus.write_byte_data(self.address, 0xF2, 0x01)  # Humidity oversampling x1
-        self.bus.write_byte_data(self.address, 0xF4, 0x27)  # Temp/Press oversampling x1, normal mode
-        self.bus.write_byte_data(self.address, 0xF5, 0xA0)  # Standby 1000ms, filter off
+        with i2c_lock:
+            chip_id = self.bus.read_byte_data(self.address, 0xD0)
+            if chip_id not in [0x60, 0x58]:
+                raise RuntimeError(f"Unexpected Chip ID: {hex(chip_id)}. Expected 0x60 or 0x58.")
+            self.is_bme = (chip_id == 0x60)
+            self._load_calibration()
+            # Initialize sensor
+            if self.is_bme:
+                self.bus.write_byte_data(self.address, 0xF2, 0x01)  # Humidity oversampling x1
+            self.bus.write_byte_data(self.address, 0xF4, 0x27)  # Temp/Press oversampling x1, normal mode
+            self.bus.write_byte_data(self.address, 0xF5, 0xA0)  # Standby 1000ms, filter off
 
     def _load_calibration(self):
         def read_u16(reg):
@@ -200,7 +214,8 @@ class BME280:
             if self.cal['H6'] > 127: self.cal['H6'] -= 256
 
     def read_data(self):
-        data = self.bus.read_i2c_block_data(self.address, 0xF7, 8 if self.is_bme else 6)
+        with i2c_lock:
+            data = self.bus.read_i2c_block_data(self.address, 0xF7, 8 if self.is_bme else 6)
         pres_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
         temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
         hum_raw = ((data[6] << 8) | data[7]) if self.is_bme else 0
@@ -245,10 +260,7 @@ class BME280:
         return temp, pressure, humidity
 
     def close(self):
-        try:
-            self.bus.close()
-        except Exception:
-            pass
+        pass
 
 
 CH_PWM1 = 0
@@ -399,6 +411,7 @@ TOPIC_FEEDBACK_RELAY4 = _topic("sensor", "status_relay4", "state")
 TOPIC_FEEDBACK_RELAY5 = _topic("sensor", "status_relay5", "state")
 TOPIC_FEEDBACK_RELAY6 = _topic("sensor", "status_relay6", "state")
 
+TOPIC_RES2 = _topic("sensor", "status_res2", "state")
 TOPIC_RES3 = _topic("sensor", "status_res3", "state")
 TOPIC_RES4 = _topic("sensor", "status_res4", "state")
 
@@ -445,7 +458,7 @@ logger.info("Opening I2C bus %s, PCA9685 addr=%s", I2C_BUS, hex(PCA_ADDR))
 pca = None
 for attempt in range(1, 11):
     try:
-        pca = PCA9685(I2C_BUS, PCA_ADDR)
+        pca = PCA9685(shared_bus, PCA_ADDR)
         pca.set_pwm_freq(PCA_FREQ)
         logger.info("PCA9685 global PWM frequency set to %s Hz", PCA_FREQ)
         break
@@ -461,7 +474,7 @@ if pca is None:
 logger.info("Opening I2C bus %s, PCA9539 addr=%s", I2C_BUS, hex(PCA9539_ADDR))
 pca9539 = None
 try:
-    pca9539 = PCA9539(I2C_BUS, PCA9539_ADDR)
+    pca9539 = PCA9539(shared_bus, PCA9539_ADDR)
     logger.info("PCA9539 GPIO expander initialized")
 except Exception as e:
     logger.warning("PCA9539 initialization failed: %s. GPIO feedback will be disabled.", e)
@@ -470,7 +483,7 @@ except Exception as e:
 logger.info("Opening I2C bus %s, PCA9540B addr=%s", I2C_BUS, hex(PCA9540_ADDR))
 pca9540 = None
 try:
-    pca9540 = PCA9540B(I2C_BUS, PCA9540_ADDR)
+    pca9540 = PCA9540B(shared_bus, PCA9540_ADDR)
     logger.info("PCA9540B multiplexer initialized")
 except Exception as e:
     logger.warning("PCA9540B initialization failed: %s. I2C multiplexing disabled.", e)
@@ -480,13 +493,20 @@ def init_bme(channel_code: int, address: int, label: str):
     if not pca9540:
         return None
     try:
+        # First select the channel on the mux
         pca9540.select_channel(channel_code)
         time.sleep(0.01)
-        sensor = BME280(I2C_BUS, address)
+        # Then initialize the sensor
+        sensor = BME280(shared_bus, address)
         logger.info("BME280 sensor initialized on %s at %s", label, hex(address))
+        # Deselect after init
+        pca9540.deselect_channels()
         return sensor
     except Exception as e:
         logger.warning("BME280 initialization failed on %s at %s: %s", label, hex(address), e)
+        # Ensure we deselect even on failure
+        try: pca9540.deselect_channels()
+        except: pass
         return None
 
 
@@ -572,54 +592,56 @@ def pca9539_worker():
                     client.publish(TOPIC_PCA9539_INPUTS, json.dumps({"raw": inputs, "hex": hex(inputs)}), retain=True)
                     last_inputs = inputs
                 
-    # Feedback Logic
-    # IO0: 0-5 Relays, 6-7 TAXO
-    # IO1: 0 ENA, 1 DIR, 2 PU, 4 RES4, 5 RES3
+                # Feedback Logic
+                # IO0: 0-5 Relays, 6-7 TAXO
+                # IO1: 0 ENA, 1 DIR, 2 PU, 4 RES4, 5 RES3
 
-    # Relays (IO0_0 to IO0_5) - High=OFF (1), Low=ON (0)
-    relays_states = [heater_1, heater_2, heater_3, heater_4, fan_1_power, fan_2_power]
-    relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY3, 
-                    TOPIC_FEEDBACK_RELAY4, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
-    
-    for i in range(6):
-        expected_on = relays_states[i]
-        actual_bit = (inputs >> i) & 1
-        # If expected ON, bit should be 0. If expected OFF, bit should be 1.
-        is_ok = (expected_on == (actual_bit == 0))
-        client.publish(relay_topics[i], "green" if is_ok else "red", retain=True)
+                # Relays (IO0_0 to IO0_5) - High=OFF (1), Low=ON (0)
+                relays_states = [heater_1, heater_2, heater_3, heater_4, fan_1_power, fan_2_power]
+                relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY3, 
+                                TOPIC_FEEDBACK_RELAY4, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
+                
+                for i in range(6):
+                    expected_on = relays_states[i]
+                    actual_bit = (inputs >> i) & 1
+                    # If expected ON, bit should be 0. If expected OFF, bit should be 1.
+                    is_ok = (expected_on == (actual_bit == 0))
+                    client.publish(relay_topics[i], "green" if is_ok else "red", retain=True)
 
-    # Stepper (IO1_0 to IO1_2 -> bits 8 to 10)
-    # ENA (IO1_0)
-    ena_actual = (inputs >> 8) & 1
-    ena_ok = (stepper_ena == (ena_actual == 1))
-    client.publish(TOPIC_FEEDBACK_ENA, "green" if ena_ok else "red", retain=True)
+                # Stepper (IO1_0 to IO1_2 -> bits 8 to 10)
+                # ENA (IO1_0)
+                ena_actual = (inputs >> 8) & 1
+                ena_ok = (stepper_ena == (ena_actual == 1))
+                client.publish(TOPIC_FEEDBACK_ENA, "green" if ena_ok else "red", retain=True)
 
-    # DIR (IO1_1)
-    dir_actual = (inputs >> 9) & 1
-    dir_expected_high = (stepper_dir == "CW")
-    dir_ok = (dir_expected_high == (dir_actual == 1))
-    client.publish(TOPIC_FEEDBACK_DIR, "green" if dir_ok else "red", retain=True)
+                # DIR (IO1_1)
+                dir_actual = (inputs >> 9) & 1
+                dir_expected_high = (stepper_dir == "CW")
+                dir_ok = (dir_expected_high == (dir_actual == 1))
+                client.publish(TOPIC_FEEDBACK_DIR, "green" if dir_ok else "red", retain=True)
 
-    # PU (IO1_2) - This is a pulse.
-    pu_actual = (inputs >> 10) & 1
-    if not pu_enabled:
-        pu_ok = (pu_actual == 0)
-    else:
-        # Check if pulsing: bit should change over time
-        pu_history.append(pu_actual)
-        if len(pu_history) > 5: pu_history.pop(0)
-        # If all readings in history are the same, it's stuck
-        if len(pu_history) >= 3 and all(x == pu_history[0] for x in pu_history):
-            pu_ok = False
-        else:
-            pu_ok = True
-    client.publish(TOPIC_FEEDBACK_PU, "green" if pu_ok else "red", retain=True)
+                # PU (IO1_2) - This is a pulse.
+                pu_actual = (inputs >> 10) & 1
+                if not pu_enabled:
+                    pu_ok = (pu_actual == 0)
+                else:
+                    # Check if pulsing: bit should change over time
+                    pu_history.append(pu_actual)
+                    if len(pu_history) > 5: pu_history.pop(0)
+                    # If all readings in history are the same, it's stuck
+                    if len(pu_history) >= 3 and all(x == pu_history[0] for x in pu_history):
+                        pu_ok = False
+                    else:
+                        pu_ok = True
+                client.publish(TOPIC_FEEDBACK_PU, "green" if pu_ok else "red", retain=True)
 
-    # Reserve inputs IO1_4 (RES4), IO1_5 (RES3)
-    res4_actual = (inputs >> 12) & 1
-    res3_actual = (inputs >> 13) & 1
-    client.publish(TOPIC_RES4, "ON" if res4_actual == 1 else "OFF", retain=True)
-    client.publish(TOPIC_RES3, "ON" if res3_actual == 1 else "OFF", retain=True)
+                # Reserve inputs IO1_4 (RES4), IO1_5 (RES3), IO1_6 (RES2)
+                res4_actual = (inputs >> 12) & 1
+                res3_actual = (inputs >> 13) & 1
+                res2_actual = (inputs >> 14) & 1
+                client.publish(TOPIC_RES4, "ON" if res4_actual == 1 else "OFF", retain=True)
+                client.publish(TOPIC_RES3, "ON" if res3_actual == 1 else "OFF", retain=True)
+                client.publish(TOPIC_RES2, "ON" if res2_actual == 1 else "OFF", retain=True)
 
                 # Fans TAXO (IO0_6, IO0_7)
                 # Fan 1 (PWM1)
@@ -703,8 +725,12 @@ def bme_worker():
                         client.publish(TOPIC_BME_CH0_77_PRESS, f"{press:.2f}", retain=True)
                         if bme_ch0_77.is_bme:
                             client.publish(TOPIC_BME_CH0_77_HUM, f"{hum:.2f}", retain=True)
+                
+                pca9540.deselect_channels()
             except Exception as e:
                 logger.error("BME280 CH0 read error: %s", e)
+                try: pca9540.deselect_channels()
+                except: pass
 
         # Read CH1
         if bme_ch1_76 and pca9540:
@@ -717,8 +743,12 @@ def bme_worker():
                     client.publish(TOPIC_BME_CH1_76_PRESS, f"{press:.2f}", retain=True)
                     if bme_ch1_76.is_bme:
                         client.publish(TOPIC_BME_CH1_76_HUM, f"{hum:.2f}", retain=True)
+                
+                pca9540.deselect_channels()
             except Exception as e:
                 logger.error("BME280 CH1 read error: %s", e)
+                try: pca9540.deselect_channels()
+                except: pass
 
         time.sleep(BME_INTERVAL)
 
@@ -1311,6 +1341,12 @@ def publish_discovery():
             "name": "Status Relay 6",
             "unique_id": "status_relay6",
             "state_topic": TOPIC_FEEDBACK_RELAY6,
+            "device": device_info_feedback,
+        }),
+        ("sensor", "status_res2", {
+            "name": "Status RES2",
+            "unique_id": "status_res2",
+            "state_topic": TOPIC_RES2,
             "device": device_info_feedback,
         }),
         ("sensor", "status_res3", {
