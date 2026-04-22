@@ -1008,7 +1008,7 @@ DISCOVERIES = [
         "unit_of_measurement": "%",
         "mode": "slider",
         "device": device_info_fans,
-    }),
+    }, "0"),
     ("switch", "pca_fan_1_power", {
         "name": "FAN 1 Power",
         "unique_id": "pca_fan_1_power",
@@ -1018,7 +1018,7 @@ DISCOVERIES = [
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": device_info_fans,
-    }),
+    }, "OFF"),
     ("number", "pca_pwm2_duty", {
         "name": "FAN 2 Speed Duty",
         "unique_id": "pca_pwm2_duty",
@@ -1031,7 +1031,7 @@ DISCOVERIES = [
         "unit_of_measurement": "%",
         "mode": "slider",
         "device": device_info_fans,
-    }),
+    }, "0"),
     ("switch", "pca_fan_2_power", {
         "name": "FAN 2 Power",
         "unique_id": "pca_fan_2_power",
@@ -1041,7 +1041,7 @@ DISCOVERIES = [
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": device_info_fans,
-    }),
+    }, "OFF"),
     ("switch", "pca_heater_1", {
         "name": "Heater 1",
         "unique_id": "pca_heater_1",
@@ -1051,7 +1051,7 @@ DISCOVERIES = [
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": device_info_heaters,
-    }),
+    }, "OFF"),
     ("switch", "pca_heater_2", {
         "name": "Heater 2",
         "unique_id": "pca_heater_2",
@@ -1061,7 +1061,7 @@ DISCOVERIES = [
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": device_info_heaters,
-    }),
+    }, "OFF"),
     ("switch", "pca_heater_3", {
         "name": "Heater 3",
         "unique_id": "pca_heater_3",
@@ -1071,7 +1071,7 @@ DISCOVERIES = [
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": device_info_heaters,
-    }),
+    }, "OFF"),
     ("switch", "pca_heater_4", {
         "name": "Heater 4",
         "unique_id": "pca_heater_4",
@@ -1081,7 +1081,7 @@ DISCOVERIES = [
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": device_info_heaters,
-    }),
+    }, "OFF"),
     ("select", "pca_stepper_dir", {
         "name": "DIR",
         "unique_id": "pca_stepper_dir",
@@ -1090,7 +1090,7 @@ DISCOVERIES = [
         "availability_topic": AVAIL_TOPIC,
         "options": ["CW", "CCW"],
         "device": device_info_stepper,
-    }),
+    }, None),  # Will handle stepper_dir dynamically
     ("switch", "pca_stepper_ena", {
         "name": "ENA",
         "unique_id": "pca_stepper_ena",
@@ -1100,7 +1100,7 @@ DISCOVERIES = [
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": device_info_stepper,
-    }),
+    }, "OFF"),
     ("switch", "pca_pu_enable", {
         "name": "PU Enable",
         "unique_id": "pca_pu_enable",
@@ -1110,7 +1110,7 @@ DISCOVERIES = [
         "payload_on": "ON",
         "payload_off": "OFF",
         "device": device_info_stepper,
-    }),
+    }, "OFF"),
     ("number", "pca_pu_freq_hz", {
         "name": "PU Frequency",
         "unique_id": "pca_pu_freq_hz",
@@ -1123,7 +1123,7 @@ DISCOVERIES = [
         "unit_of_measurement": "Hz",
         "mode": "slider",
         "device": device_info_stepper,
-    }),
+    }, None),  # Will handle pu_freq_hz dynamically
     ("sensor", "pca9539_inputs", {
         "name": "GPIO Feedback",
         "unique_id": "pca9539_inputs",
@@ -1305,36 +1305,43 @@ DISCOVERIES = [
 ]
 
 
+
 def clear_discovery():
     """Clear old retained discovery messages by publishing empty payloads."""
-    for component, unique_id, _ in DISCOVERIES:
+    for item in DISCOVERIES:
+        component, unique_id = item[0], item[1]
         topic = f"homeassistant/{component}/{unique_id}/config"
         client.publish(topic, "", retain=True)
     logger.info("Old discovery messages cleared")
 
 
 def publish_discovery():
+    """Publish discovery configurations and initial states."""
     clear_discovery()
-    for component, unique_id, payload in DISCOVERIES:
-        topic = f"homeassistant/{component}/{unique_id}/config"
-        client.publish(topic, json.dumps(payload), retain=True)
+    for item in DISCOVERIES:
+        component, unique_id, payload = item[0], item[1], item[2]
+        # 1. Publish discovery config
+        config_topic = f"homeassistant/{component}/{unique_id}/config"
+        client.publish(config_topic, json.dumps(payload), retain=True)
 
+        # 2. Publish initial state if specified
+        if len(item) > 3:
+            state_topic = payload.get("state_topic")
+            initial_val = item[3]
+
+            # Handle dynamic initial values
+            if initial_val is None:
+                if unique_id == "pca_stepper_dir":
+                    initial_val = stepper_dir
+                elif unique_id == "pca_pu_freq_hz":
+                    initial_val = str(int(pu_freq_hz))
+
+            if state_topic and initial_val is not None:
+                client.publish(state_topic, initial_val, retain=True)
+
+    # 3. Set availability
     client.publish(AVAIL_TOPIC, "online", retain=True)
-
-    client.publish(TOPIC_PWM1_DUTY_STATE, "0", retain=True)
-    client.publish(TOPIC_FAN_1_POWER_STATE, "OFF", retain=True)
-    client.publish(TOPIC_PWM2_DUTY_STATE, "0", retain=True)
-    client.publish(TOPIC_FAN_2_POWER_STATE, "OFF", retain=True)
-    client.publish(TOPIC_HEATER_1_STATE, "OFF", retain=True)
-    client.publish(TOPIC_HEATER_2_STATE, "OFF", retain=True)
-    client.publish(TOPIC_HEATER_3_STATE, "OFF", retain=True)
-    client.publish(TOPIC_HEATER_4_STATE, "OFF", retain=True)
-    client.publish(TOPIC_STEPPER_DIR_STATE, stepper_dir, retain=True)
-    client.publish(TOPIC_STEPPER_ENA_STATE, "OFF", retain=True)
-    client.publish(TOPIC_PU_ENABLE_STATE, "OFF", retain=True)
-    client.publish(TOPIC_PU_FREQ_STATE, str(int(pu_freq_hz)), retain=True)
-
-    logger.info("Discovery messages published")
+    logger.info("Discovery messages and initial states published")
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
