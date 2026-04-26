@@ -1220,6 +1220,27 @@ DISCOVERIES = [
 
 def clear_discovery():
     """Clear old retained discovery messages by publishing empty payloads."""
+    # List of unique_ids that were previously used but are now removed
+    deprecated = [
+        ("binary_sensor", "status_ena"),
+        ("binary_sensor", "status_dir"),
+        ("binary_sensor", "status_pu"),
+        ("binary_sensor", "status_relay1"),
+        ("binary_sensor", "status_relay2"),
+        ("binary_sensor", "status_relay3"),
+        ("binary_sensor", "status_relay4"),
+        ("binary_sensor", "status_relay5"),
+        ("binary_sensor", "status_relay6"),
+        ("sensor", "status_res2"),
+        ("sensor", "status_res3"),
+        ("sensor", "status_res4"),
+        ("sensor", "pca9539_inputs"),
+    ]
+    
+    for component, unique_id in deprecated:
+        topic = f"homeassistant/{component}/{unique_id}/config"
+        client.publish(topic, "", retain=True)
+        
     for item in DISCOVERIES:
         component, unique_id = item[0], item[1]
         topic = f"homeassistant/{component}/{unique_id}/config"
