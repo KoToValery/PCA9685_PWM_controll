@@ -1124,13 +1124,6 @@ DISCOVERIES = [
         "mode": "slider",
         "device": device_info_stepper,
     }, None),  # Will handle pu_freq_hz dynamically
-    ("sensor", "pca9539_inputs", {
-        "name": "GPIO Feedback",
-        "unique_id": "pca9539_inputs",
-        "state_topic": TOPIC_PCA9539_INPUTS,
-        "value_template": "{{ value_json.hex }}",
-        "device": device_info_pca9539,
-    }),
     # BME280 CH0 0x76
     ("sensor", "bme280_ch0_0x76_temperature", {
         "name": "Temperature CH0 0x76",
@@ -1207,27 +1200,6 @@ DISCOVERIES = [
         "device": device_info_bme_ch1_77,
     }),
     # Status Feedback (Binary sensors)
-    ("binary_sensor", "status_ena", {
-        "name": "Status ENA",
-        "unique_id": "status_ena",
-        "state_topic": TOPIC_FEEDBACK_ENA,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("binary_sensor", "status_dir", {
-        "name": "Status DIR",
-        "unique_id": "status_dir",
-        "state_topic": TOPIC_FEEDBACK_DIR,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("binary_sensor", "status_pu", {
-        "name": "Status PU",
-        "unique_id": "status_pu",
-        "state_topic": TOPIC_FEEDBACK_PU,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
     ("binary_sensor", "status_fan1", {
         "name": "Status Fan 1",
         "unique_id": "status_fan1",
@@ -1240,66 +1212,6 @@ DISCOVERIES = [
         "unique_id": "status_fan2",
         "state_topic": TOPIC_FEEDBACK_FAN2,
         "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("binary_sensor", "status_relay1", {
-        "name": "Status Relay 1",
-        "unique_id": "status_relay1",
-        "state_topic": TOPIC_FEEDBACK_RELAY1,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("binary_sensor", "status_relay2", {
-        "name": "Status Relay 2",
-        "unique_id": "status_relay2",
-        "state_topic": TOPIC_FEEDBACK_RELAY2,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("binary_sensor", "status_relay3", {
-        "name": "Status Relay 3",
-        "unique_id": "status_relay3",
-        "state_topic": TOPIC_FEEDBACK_RELAY3,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("binary_sensor", "status_relay4", {
-        "name": "Status Relay 4",
-        "unique_id": "status_relay4",
-        "state_topic": TOPIC_FEEDBACK_RELAY4,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("binary_sensor", "status_relay5", {
-        "name": "Status Relay 5",
-        "unique_id": "status_relay5",
-        "state_topic": TOPIC_FEEDBACK_RELAY5,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("binary_sensor", "status_relay6", {
-        "name": "Status Relay 6",
-        "unique_id": "status_relay6",
-        "state_topic": TOPIC_FEEDBACK_RELAY6,
-        "device_class": "problem",
-        "device": device_info_feedback,
-    }),
-    ("sensor", "status_res2", {
-        "name": "Status RES2",
-        "unique_id": "status_res2",
-        "state_topic": TOPIC_RES2,
-        "device": device_info_feedback,
-    }),
-    ("sensor", "status_res3", {
-        "name": "Status RES3",
-        "unique_id": "status_res3",
-        "state_topic": TOPIC_RES3,
-        "device": device_info_feedback,
-    }),
-    ("sensor", "status_res4", {
-        "name": "Status RES4",
-        "unique_id": "status_res4",
-        "state_topic": TOPIC_RES4,
         "device": device_info_feedback,
     }),
 ]
