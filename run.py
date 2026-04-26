@@ -378,9 +378,9 @@ TOPIC_BME_CH0_77_TEMP = _topic("sensor", "bme280_ch0_0x77_temperature", "state")
 TOPIC_BME_CH0_77_HUM = _topic("sensor", "bme280_ch0_0x77_humidity", "state")
 TOPIC_BME_CH0_77_PRESS = _topic("sensor", "bme280_ch0_0x77_pressure", "state")
 
-TOPIC_BME_CH1_76_TEMP = _topic("sensor", "bme280_ch1_0x76_temperature", "state")
-TOPIC_BME_CH1_76_HUM = _topic("sensor", "bme280_ch1_0x76_humidity", "state")
-TOPIC_BME_CH1_76_PRESS = _topic("sensor", "bme280_ch1_0x76_pressure", "state")
+TOPIC_BME_CH1_77_TEMP = _topic("sensor", "bme280_ch1_0x77_temperature", "state")
+TOPIC_BME_CH1_77_HUM = _topic("sensor", "bme280_ch1_0x77_humidity", "state")
+TOPIC_BME_CH1_77_PRESS = _topic("sensor", "bme280_ch1_0x77_pressure", "state")
 
 TOPIC_PCA9539_INPUTS = "homeassistant/sensor/pca9539_inputs/state"
 
@@ -498,7 +498,7 @@ def init_bme(channel_code: int, address: int, label: str):
 
 bme_ch0_76 = init_bme(PCA9540B.CH0, 0x76, "CH0")
 bme_ch0_77 = init_bme(PCA9540B.CH0, 0x77, "CH0")
-bme_ch1_76 = init_bme(PCA9540B.CH1, 0x76, "CH1")
+bme_ch1_77 = init_bme(PCA9540B.CH1, 0x77, "CH1")
 
 
 pwm1_value = 0.0
@@ -723,16 +723,16 @@ def bme_worker():
                 except: pass
 
         # Read CH1
-        if bme_ch1_76 and pca9540:
+        if bme_ch1_77 and pca9540:
             try:
                 pca9540.select_channel(PCA9540B.CH1)
                 time.sleep(0.01)
-                temp, press, hum = bme_ch1_76.read_data()
+                temp, press, hum = bme_ch1_77.read_data()
                 if temp is not None:
-                    client.publish(TOPIC_BME_CH1_76_TEMP, f"{temp:.2f}", retain=True)
-                    client.publish(TOPIC_BME_CH1_76_PRESS, f"{press:.2f}", retain=True)
-                    if bme_ch1_76.is_bme:
-                        client.publish(TOPIC_BME_CH1_76_HUM, f"{hum:.2f}", retain=True)
+                    client.publish(TOPIC_BME_CH1_77_TEMP, f"{temp:.2f}", retain=True)
+                    client.publish(TOPIC_BME_CH1_77_PRESS, f"{press:.2f}", retain=True)
+                    if bme_ch1_77.is_bme:
+                        client.publish(TOPIC_BME_CH1_77_HUM, f"{hum:.2f}", retain=True)
                 
                 pca9540.deselect_channels()
             except Exception as e:
@@ -745,7 +745,7 @@ def bme_worker():
 
 def bme_start():
     global bme_thread, bme_running
-    if not (bme_ch0_76 or bme_ch0_77 or bme_ch1_76):
+    if not (bme_ch0_76 or bme_ch0_77 or bme_ch1_77):
         return
     with bme_lock:
         if bme_thread and bme_thread.is_alive():
@@ -984,9 +984,9 @@ device_info_bme_ch0_77 = {
     "model": "BME280/BMP280",
 }
 
-device_info_bme_ch1_76 = {
-    "identifiers": ["pca9685_bme280_ch1_0x76"],
-    "name": "BME280 CH1 0x76",
+device_info_bme_ch1_77 = {
+    "identifiers": ["pca9685_bme280_ch1_0x77"],
+    "name": "BME280 CH1 0x77",
     "model": "BME280/BMP280",
 }
 
@@ -1183,28 +1183,28 @@ DISCOVERIES = [
     }),
     # BME280 CH1 0x76
     ("sensor", "bme280_ch1_0x76_temperature", {
-        "name": "Temperature CH1 0x76",
-        "unique_id": "bme280_ch1_0x76_temperature",
-        "state_topic": TOPIC_BME_CH1_76_TEMP,
+        "name": "Temperature CH1 0x77",
+        "unique_id": "bme280_ch1_0x77_temperature",
+        "state_topic": TOPIC_BME_CH1_77_TEMP,
         "unit_of_measurement": "°C",
         "device_class": "temperature",
-        "device": device_info_bme_ch1_76,
+        "device": device_info_bme_ch1_77,
     }),
     ("sensor", "bme280_ch1_0x76_humidity", {
         "name": "Humidity CH1 0x76",
         "unique_id": "bme280_ch1_0x76_humidity",
-        "state_topic": TOPIC_BME_CH1_76_HUM,
+        "state_topic": TOPIC_BME_CH1_77_HUM,
         "unit_of_measurement": "%",
         "device_class": "humidity",
-        "device": device_info_bme_ch1_76,
+        "device": device_info_bme_ch1_77,
     }),
     ("sensor", "bme280_ch1_0x76_pressure", {
         "name": "Pressure CH1 0x76",
         "unique_id": "bme280_ch1_0x76_pressure",
-        "state_topic": TOPIC_BME_CH1_76_PRESS,
+        "state_topic": TOPIC_BME_CH1_77_PRESS,
         "unit_of_measurement": "hPa",
         "device_class": "pressure",
-        "device": device_info_bme_ch1_76,
+        "device": device_info_bme_ch1_77,
     }),
     # Status Feedback (Binary sensors)
     ("binary_sensor", "status_ena", {
