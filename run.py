@@ -691,8 +691,8 @@ def pca9539_worker():
                 # ON (Problem) if actual doesn't match expected, OFF (No Problem) otherwise
                 any_problem = False
 
-                # Relays (IO0_0 to IO0_5)
-                relays_states = [heater_1, heater_2, heater_3, heater_4, fan_1_power, fan_2_power]
+                # Relays (IO0_0 to IO0_5) - corrected physical mapping
+                relays_states = [heater_1, heater_2, heater_4, heater_3, fan_1_power, fan_2_power]
                 relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY4, 
                                 TOPIC_FEEDBACK_RELAY3, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
                 
@@ -709,25 +709,34 @@ def pca9539_worker():
                 if not ena_ok: any_problem = True
                 client.publish(TOPIC_FEEDBACK_ENA, "ON" if not ena_ok else "OFF", retain=True)
 
-                dir_actual = (inputs >> 9) & 1
-                dir_expected_high = (stepper_dir == "CW")
-                dir_ok = (dir_expected_high == (dir_actual == 1))
-                if not dir_ok: any_problem = True
-                client.publish(TOPIC_FEEDBACK_DIR, "ON" if not dir_ok else "OFF", retain=True)
-
-                # PU
-                pu_actual = (inputs >> 10) & 1
-                if not pu_enabled:
-                    pu_ok = (pu_actual == 0)
+                # DIR feedback only meaningful when stepper is enabled
+                if stepper_ena:
+                    dir_actual = (inputs >> 9) & 1
+                    dir_expected_high = (stepper_dir == "CW")
+                    dir_ok = (dir_expected_high == (dir_actual == 1))
+                    if not dir_ok: any_problem = True
+                    client.publish(TOPIC_FEEDBACK_DIR, "ON" if not dir_ok else "OFF", retain=True)
                 else:
-                    pu_history.append(pu_actual)
-                    if len(pu_history) > 5: pu_history.pop(0)
-                    if len(pu_history) >= 3 and all(x == pu_history[0] for x in pu_history):
-                        pu_ok = False
+                    # When stepper is disabled, DIR feedback is not meaningful
+                    client.publish(TOPIC_FEEDBACK_DIR, "OFF", retain=True)
+
+                # PU feedback only meaningful when stepper is enabled
+                if stepper_ena:
+                    pu_actual = (inputs >> 10) & 1
+                    if not pu_enabled:
+                        pu_ok = (pu_actual == 0)
                     else:
-                        pu_ok = True
-                if not pu_ok: any_problem = True
-                client.publish(TOPIC_FEEDBACK_PU, "ON" if not pu_ok else "OFF", retain=True)
+                        pu_history.append(pu_actual)
+                        if len(pu_history) > 5: pu_history.pop(0)
+                        if len(pu_history) >= 3 and all(x == pu_history[0] for x in pu_history):
+                            pu_ok = False
+                        else:
+                            pu_ok = True
+                    if not pu_ok: any_problem = True
+                    client.publish(TOPIC_FEEDBACK_PU, "ON" if not pu_ok else "OFF", retain=True)
+                else:
+                    # When stepper is disabled, PU feedback is not meaningful
+                    client.publish(TOPIC_FEEDBACK_PU, "OFF", retain=True)
 
                 # TAXO 1
                 taxo1_actual = (inputs >> 6) & 1
