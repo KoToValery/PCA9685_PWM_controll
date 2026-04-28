@@ -347,6 +347,12 @@ COLOR_BLUE = (0, 0, 4095)
 system_status = "DIAGNOSTIC"  # OK, ERROR, DIAGNOSTIC
 status_lock = threading.Lock()
 
+# Initial diagnostic tracking for LED behavior
+initial_diagnostic_done = False
+initial_diagnostic_errors = False
+initial_diagnostic_end_time = 0
+diagnostic_error_blink_until = 0
+
 def set_rgb_color(color_tuple):
     pca.set_duty_12bit(CH_LED_RED, color_tuple[0])
     pca.set_duty_12bit(CH_LED_GREEN, color_tuple[1])
@@ -360,7 +366,8 @@ def get_pca9539_pin(pin_idx):
     return (inputs >> pin_idx) & 1
 
 def hardware_diagnostic():
-    global system_status
+    global system_status, initial_diagnostic_done, initial_diagnostic_errors
+    global initial_diagnostic_end_time, diagnostic_error_blink_until
     logger.info("Starting automated hardware diagnostic...")
     
     # Set status to diagnostic (will be used by sys_led_worker if it's already running)
@@ -447,6 +454,14 @@ def hardware_diagnostic():
             system_status = "OK"
         set_rgb_color(COLOR_GREEN) # Briefly show green
         time.sleep(1)
+
+    # Record diagnostic completion for LED behavior
+    initial_diagnostic_done = True
+    initial_diagnostic_errors = len(problems) > 0
+    initial_diagnostic_end_time = time.time()
+    if initial_diagnostic_errors:
+        diagnostic_error_blink_until = initial_diagnostic_end_time + 30  # Blink for 30 seconds
+        logger.info("Initial diagnostic had errors - RED LED will blink for 30 seconds")
 
     set_rgb_color(COLOR_OFF)
     return len(problems) == 0
@@ -668,6 +683,7 @@ def pca9539_worker():
     global stepper_ena, stepper_dir
     global pu_enabled
     global pwm1_value, pwm2_value
+    global initial_diagnostic_done, initial_diagnostic_errors, diagnostic_error_blink_until
 
     last_inputs = None
     
@@ -691,10 +707,10 @@ def pca9539_worker():
                 # ON (Problem) if actual doesn't match expected, OFF (No Problem) otherwise
                 any_problem = False
 
-                # Relays (IO0_0 to IO0_5) - corrected physical mapping
-                relays_states = [heater_1, heater_2, heater_4, heater_3, fan_1_power, fan_2_power]
-                relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY4, 
-                                TOPIC_FEEDBACK_RELAY3, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
+                # Relays (IO0_0 to IO0_5) - physical mapping: bit0=RL1, bit1=RL2, bit2=RL3, bit3=RL4, bit4=RL5, bit5=RL6
+                relays_states = [heater_1, heater_2, heater_3, heater_4, fan_1_power, fan_2_power]
+                relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY3,
+                                TOPIC_FEEDBACK_RELAY4, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
                 
                 for i in range(6):
                     expected_on = relays_states[i]
@@ -778,22 +794,28 @@ def pca9539_worker():
                 client.publish(TOPIC_RES3, "ON" if res3_actual == 1 else "OFF", retain=True)
                 client.publish(TOPIC_RES2, "ON" if res2_actual == 1 else "OFF", retain=True)
 
-                # Automatic LED control
-                if any_problem:
-                    # Blink RED, turn off GREEN
-                    led_blink_state = not led_blink_state
-                    if led_blink_state:
-                        channel_on(CH_LED_RED)
+                # Automatic LED control (only when not in initial 30s diagnostic error blink)
+                in_initial_error_blink = False
+                if initial_diagnostic_done and initial_diagnostic_errors:
+                    if time.time() < diagnostic_error_blink_until:
+                        in_initial_error_blink = True
+
+                if not in_initial_error_blink:
+                    if any_problem:
+                        # Blink RED, turn off GREEN
+                        led_blink_state = not led_blink_state
+                        if led_blink_state:
+                            channel_on(CH_LED_RED)
+                        else:
+                            channel_off(CH_LED_RED)
+                        channel_off(CH_LED_GREEN)
                     else:
+                        # Turn on GREEN, turn off RED
+                        channel_on(CH_LED_GREEN)
                         channel_off(CH_LED_RED)
-                    channel_off(CH_LED_GREEN)
-                else:
-                    # Turn on GREEN, turn off RED
-                    channel_on(CH_LED_GREEN)
-                    channel_off(CH_LED_RED)
-                
-                # BLUE LED is dropped
-                channel_off(CH_LED_BLUE)
+
+                    # BLUE LED is dropped
+                    channel_off(CH_LED_BLUE)
 
             except Exception as e:
                 logger.error("PCA9539 read error: %s", e)
@@ -1131,22 +1153,35 @@ def pu_stop():
 
 def sys_led_worker():
     global sys_led_running, system_status
+    global initial_diagnostic_done, initial_diagnostic_errors, diagnostic_error_blink_until
     level = False
-    
+
     while sys_led_running:
         level = not level
-        
+
         # System LED (CH15) always blinks
         if level:
             channel_on(CH_SYS_LED)
         else:
             channel_off(CH_SYS_LED)
-            
+
         # RGB LED status
         with status_lock:
             current_status = system_status
-            
-        if current_status == "OK":
+
+        # Check if in initial 30s error blink period after diagnostic
+        in_initial_error_blink = False
+        if initial_diagnostic_done and initial_diagnostic_errors:
+            if time.time() < diagnostic_error_blink_until:
+                in_initial_error_blink = True
+
+        if in_initial_error_blink:
+            # First 30 seconds after diagnostic with errors: blink red
+            if level:
+                set_rgb_color(COLOR_RED)
+            else:
+                set_rgb_color(COLOR_OFF)
+        elif current_status == "OK":
             # Normal: Blink Green
             if level:
                 set_rgb_color(COLOR_GREEN)
@@ -1161,7 +1196,7 @@ def sys_led_worker():
         elif current_status == "DIAGNOSTIC":
             # Diagnostic: Blue (already set by hardware_diagnostic, but let's be sure)
             set_rgb_color(COLOR_BLUE)
-            
+
         time.sleep(1.0)
 
     channel_off(CH_SYS_LED)
