@@ -453,6 +453,14 @@ def hardware_diagnostic():
     return len(problems) == 0
 
 
+def _topic(component, unique_id, suffix):
+    """Generate Home Assistant MQTT topic string."""
+    return f"homeassistant/{component}/{unique_id}/{suffix}"
+
+
+AVAIL_TOPIC = "homeassistant/availability"
+
+
 TOPIC_PWM1_DUTY_CMD = _topic("number", "pca_pwm1_duty", "set")
 TOPIC_PWM1_DUTY_STATE = _topic("number", "pca_pwm1_duty", "state")
 
