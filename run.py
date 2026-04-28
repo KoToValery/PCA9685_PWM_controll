@@ -677,6 +677,7 @@ def pca9539_worker():
     global stepper_ena, stepper_dir
     global pu_enabled
     global pwm1_value, pwm2_value
+    global any_problem_realtime
 
     last_inputs = None
     
