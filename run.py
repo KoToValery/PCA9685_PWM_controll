@@ -400,12 +400,12 @@ def hardware_diagnostic():
     
     for ch, name in relays_to_test:
         logger.info("Testing %s...", name)
-        # Test ON
-        if not verified_apply_switch(ch, True, name):
+        # Test ON (do not update system_status during diagnostic)
+        if not verified_apply_switch(ch, True, name, update_status=False):
             problems.append(f"{name} ON failure")
         time.sleep(0.2)
         # Test OFF
-        if not verified_apply_switch(ch, False, name):
+        if not verified_apply_switch(ch, False, name, update_status=False):
             problems.append(f"{name} OFF failure")
         time.sleep(0.1)
 
@@ -417,10 +417,10 @@ def hardware_diagnostic():
     
     for ch, name in stepper_signals:
         logger.info("Testing %s...", name)
-        # Toggle and check
-        verified_apply_switch(ch, True, name)
+        # Toggle and check (do not update system_status during diagnostic)
+        verified_apply_switch(ch, True, name, update_status=False)
         time.sleep(0.1)
-        verified_apply_switch(ch, False, name)
+        verified_apply_switch(ch, False, name, update_status=False)
         time.sleep(0.1)
 
     # 3. Test PU (Pulse) detection
@@ -940,7 +940,7 @@ FEEDBACK_MAP = {
 TAXO1_PIN = 11
 TAXO2_PIN = 12
 
-def verified_apply_switch(channel: int, state: bool, name: str = "Component"):
+def verified_apply_switch(channel: int, state: bool, name: str = "Component", update_status: bool = True):
     global system_status
     feedback_pin = FEEDBACK_MAP.get(channel)
     
@@ -974,13 +974,12 @@ def verified_apply_switch(channel: int, state: bool, name: str = "Component"):
         
         if final_val != expected_after:
             logger.error("VERIFICATION FAILED for %s (CH %d): expected %d, got %d", name, channel, expected_after, final_val)
-            with status_lock:
-                system_status = "ERROR"
+            if update_status:
+                with status_lock:
+                    system_status = "ERROR"
             return False
         else:
             logger.debug("Verification passed for %s", name)
-            # If we were in error but this worked, should we clear it? 
-            # Usually better to let the diagnostic or a manual reset clear errors.
             
     return True
 
@@ -1140,12 +1139,25 @@ def sys_led_worker():
             has_problem = any_problem_realtime
 
         if current_status == "DIAGNOSTIC":
-            # Diagnostic: Blue (already set by hardware_diagnostic, but let's be sure)
+            # Diagnostic: Blue (always blue during diagnostic, ignore any_problem_realtime)
             set_rgb_color(COLOR_BLUE)
-        elif current_status == "ERROR" or has_problem:
-            # Problem: Blink Red
+        elif has_problem:
+            # Real-time problem detected: Blink Red
             if level:
                 set_rgb_color(COLOR_RED)
+            else:
+                set_rgb_color(COLOR_OFF)
+            # Ensure system_status reflects the error
+            if current_status != "ERROR":
+                with status_lock:
+                    system_status = "ERROR"
+        elif current_status == "ERROR":
+            # Status was ERROR but no current problem detected -> auto-clear to OK
+            with status_lock:
+                system_status = "OK"
+            # Blink Green
+            if level:
+                set_rgb_color(COLOR_GREEN)
             else:
                 set_rgb_color(COLOR_OFF)
         elif current_status == "OK":
