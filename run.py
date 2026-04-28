@@ -347,11 +347,6 @@ COLOR_BLUE = (0, 0, 4095)
 system_status = "DIAGNOSTIC"  # OK, ERROR, DIAGNOSTIC
 status_lock = threading.Lock()
 
-# Initial diagnostic tracking for LED behavior
-initial_diagnostic_done = False
-initial_diagnostic_errors = False
-initial_diagnostic_end_time = 0
-diagnostic_error_blink_until = 0
 
 def set_rgb_color(color_tuple):
     pca.set_duty_12bit(CH_LED_RED, color_tuple[0])
@@ -366,8 +361,7 @@ def get_pca9539_pin(pin_idx):
     return (inputs >> pin_idx) & 1
 
 def hardware_diagnostic():
-    global system_status, initial_diagnostic_done, initial_diagnostic_errors
-    global initial_diagnostic_end_time, diagnostic_error_blink_until
+    global system_status
     logger.info("Starting automated hardware diagnostic...")
     
     # Set status to diagnostic (will be used by sys_led_worker if it's already running)
@@ -446,22 +440,14 @@ def hardware_diagnostic():
         logger.error("Hardware diagnostic completed with ERRORS: %s", ", ".join(problems))
         with status_lock:
             system_status = "ERROR"
-        set_rgb_color(COLOR_RED) # Briefly show red
-        time.sleep(1)
+        set_rgb_color(COLOR_RED)
+        time.sleep(5)
     else:
         logger.info("Hardware diagnostic PASSED.")
         with status_lock:
             system_status = "OK"
-        set_rgb_color(COLOR_GREEN) # Briefly show green
-        time.sleep(1)
-
-    # Record diagnostic completion for LED behavior
-    initial_diagnostic_done = True
-    initial_diagnostic_errors = len(problems) > 0
-    initial_diagnostic_end_time = time.time()
-    if initial_diagnostic_errors:
-        diagnostic_error_blink_until = initial_diagnostic_end_time + 30  # Blink for 30 seconds
-        logger.info("Initial diagnostic had errors - RED LED will blink for 30 seconds")
+        set_rgb_color(COLOR_GREEN)
+        time.sleep(5)
 
     set_rgb_color(COLOR_OFF)
     return len(problems) == 0
@@ -683,7 +669,6 @@ def pca9539_worker():
     global stepper_ena, stepper_dir
     global pu_enabled
     global pwm1_value, pwm2_value
-    global initial_diagnostic_done, initial_diagnostic_errors, diagnostic_error_blink_until
 
     last_inputs = None
     
@@ -794,28 +779,22 @@ def pca9539_worker():
                 client.publish(TOPIC_RES3, "ON" if res3_actual == 1 else "OFF", retain=True)
                 client.publish(TOPIC_RES2, "ON" if res2_actual == 1 else "OFF", retain=True)
 
-                # Automatic LED control (only when not in initial 30s diagnostic error blink)
-                in_initial_error_blink = False
-                if initial_diagnostic_done and initial_diagnostic_errors:
-                    if time.time() < diagnostic_error_blink_until:
-                        in_initial_error_blink = True
-
-                if not in_initial_error_blink:
-                    if any_problem:
-                        # Blink RED, turn off GREEN
-                        led_blink_state = not led_blink_state
-                        if led_blink_state:
-                            channel_on(CH_LED_RED)
-                        else:
-                            channel_off(CH_LED_RED)
-                        channel_off(CH_LED_GREEN)
+                # Automatic LED control
+                if any_problem:
+                    # Blink RED, turn off GREEN
+                    led_blink_state = not led_blink_state
+                    if led_blink_state:
+                        channel_on(CH_LED_RED)
                     else:
-                        # Turn on GREEN, turn off RED
-                        channel_on(CH_LED_GREEN)
                         channel_off(CH_LED_RED)
+                    channel_off(CH_LED_GREEN)
+                else:
+                    # Turn on GREEN, turn off RED
+                    channel_on(CH_LED_GREEN)
+                    channel_off(CH_LED_RED)
 
-                    # BLUE LED is dropped
-                    channel_off(CH_LED_BLUE)
+                # BLUE LED is dropped
+                channel_off(CH_LED_BLUE)
 
             except Exception as e:
                 logger.error("PCA9539 read error: %s", e)
@@ -1153,7 +1132,6 @@ def pu_stop():
 
 def sys_led_worker():
     global sys_led_running, system_status
-    global initial_diagnostic_done, initial_diagnostic_errors, diagnostic_error_blink_until
     level = False
 
     while sys_led_running:
@@ -1169,19 +1147,7 @@ def sys_led_worker():
         with status_lock:
             current_status = system_status
 
-        # Check if in initial 30s error blink period after diagnostic
-        in_initial_error_blink = False
-        if initial_diagnostic_done and initial_diagnostic_errors:
-            if time.time() < diagnostic_error_blink_until:
-                in_initial_error_blink = True
-
-        if in_initial_error_blink:
-            # First 30 seconds after diagnostic with errors: blink red
-            if level:
-                set_rgb_color(COLOR_RED)
-            else:
-                set_rgb_color(COLOR_OFF)
-        elif current_status == "OK":
+        if current_status == "OK":
             # Normal: Blink Green
             if level:
                 set_rgb_color(COLOR_GREEN)
