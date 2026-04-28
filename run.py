@@ -347,6 +347,10 @@ COLOR_BLUE = (0, 0, 4095)
 system_status = "DIAGNOSTIC"  # OK, ERROR, DIAGNOSTIC
 status_lock = threading.Lock()
 
+# Real-time problem detection from pca9539_worker
+any_problem_realtime = False
+any_problem_lock = threading.Lock()
+
 
 def set_rgb_color(color_tuple):
     pca.set_duty_12bit(CH_LED_RED, color_tuple[0])
@@ -677,8 +681,6 @@ def pca9539_worker():
     taxo2_history = []
     pu_history = []
     
-    # LED control state
-    led_blink_state = False
 
     while pca9539_running:
         if pca9539:
@@ -779,22 +781,9 @@ def pca9539_worker():
                 client.publish(TOPIC_RES3, "ON" if res3_actual == 1 else "OFF", retain=True)
                 client.publish(TOPIC_RES2, "ON" if res2_actual == 1 else "OFF", retain=True)
 
-                # Automatic LED control
-                if any_problem:
-                    # Blink RED, turn off GREEN
-                    led_blink_state = not led_blink_state
-                    if led_blink_state:
-                        channel_on(CH_LED_RED)
-                    else:
-                        channel_off(CH_LED_RED)
-                    channel_off(CH_LED_GREEN)
-                else:
-                    # Turn on GREEN, turn off RED
-                    channel_on(CH_LED_GREEN)
-                    channel_off(CH_LED_RED)
-
-                # BLUE LED is dropped
-                channel_off(CH_LED_BLUE)
+                # Update real-time problem status for sys_led_worker
+                with any_problem_lock:
+                    any_problem_realtime = any_problem
 
             except Exception as e:
                 logger.error("PCA9539 read error: %s", e)
@@ -1132,6 +1121,7 @@ def pu_stop():
 
 def sys_led_worker():
     global sys_led_running, system_status
+    global any_problem_realtime
     level = False
 
     while sys_led_running:
@@ -1146,22 +1136,24 @@ def sys_led_worker():
         # RGB LED status
         with status_lock:
             current_status = system_status
+        with any_problem_lock:
+            has_problem = any_problem_realtime
 
-        if current_status == "OK":
-            # Normal: Blink Green
-            if level:
-                set_rgb_color(COLOR_GREEN)
-            else:
-                set_rgb_color(COLOR_OFF)
-        elif current_status == "ERROR":
+        if current_status == "DIAGNOSTIC":
+            # Diagnostic: Blue (already set by hardware_diagnostic, but let's be sure)
+            set_rgb_color(COLOR_BLUE)
+        elif current_status == "ERROR" or has_problem:
             # Problem: Blink Red
             if level:
                 set_rgb_color(COLOR_RED)
             else:
                 set_rgb_color(COLOR_OFF)
-        elif current_status == "DIAGNOSTIC":
-            # Diagnostic: Blue (already set by hardware_diagnostic, but let's be sure)
-            set_rgb_color(COLOR_BLUE)
+        elif current_status == "OK":
+            # Normal: Blink Green
+            if level:
+                set_rgb_color(COLOR_GREEN)
+            else:
+                set_rgb_color(COLOR_OFF)
 
         time.sleep(1.0)
 
