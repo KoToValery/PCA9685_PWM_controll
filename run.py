@@ -433,8 +433,7 @@ def hardware_diagnostic():
     
     if not pu_detected:
         logger.warning("PU feedback not detected during diagnostic (check R12/wiring)")
-        # We don't necessarily treat PU failure as a fatal diagnostic error 
-        # unless it's critical for the user, but we'll log it.
+        problems.append("PU feedback failure - check R12/wiring")
     
     if problems:
         logger.error("Hardware diagnostic completed with ERRORS: %s", ", ".join(problems))
@@ -694,8 +693,8 @@ def pca9539_worker():
 
                 # Relays (IO0_0 to IO0_5)
                 relays_states = [heater_1, heater_2, heater_3, heater_4, fan_1_power, fan_2_power]
-                relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY3, 
-                                TOPIC_FEEDBACK_RELAY4, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
+                relay_topics = [TOPIC_FEEDBACK_RELAY1, TOPIC_FEEDBACK_RELAY2, TOPIC_FEEDBACK_RELAY4, 
+                                TOPIC_FEEDBACK_RELAY3, TOPIC_FEEDBACK_RELAY5, TOPIC_FEEDBACK_RELAY6]
                 
                 for i in range(6):
                     expected_on = relays_states[i]
@@ -1090,9 +1089,9 @@ def pu_worker():
         # For very low frequencies, we might want to check more often
         if freq > 1.0 and pulse_feedback_count == 0:
             # We should have seen pulses
-            # logger.warning("PU feedback not detected while pulsing!")
-            # with status_lock: system_status = "ERROR"
-            pass
+            logger.warning("PU feedback not detected while pulsing!")
+            with status_lock:
+                system_status = "ERROR"
         
         pulse_feedback_count = 0
 
