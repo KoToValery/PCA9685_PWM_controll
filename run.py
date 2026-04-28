@@ -1574,6 +1574,7 @@ DISCOVERIES = [
         "via_device": device_info_stepper["identifiers"][0],
     }, None),  # Will handle pu_freq_hz dynamically
     # BME280 CH0 0x76
+    ("sensor", "bme280_ch0_0x76_temperature", {
         "name": "Temperature CH0 0x76",
         "unique_id": "bme280_ch0_0x76_temperature",
         "state_topic": TOPIC_BME_CH0_76_TEMP,
