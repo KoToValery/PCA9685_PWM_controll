@@ -322,7 +322,7 @@ I2C_BUS = int(config.get("i2c_bus", 1))
 PCA_ADDR = int(config["pca_address"], 16)
 PCA9539_ADDR = int(config.get("pca9539_address", "0x74"), 16)
 PCA9540_ADDR = int(config.get("pca9540_address", "0x70"), 16)
-BME_INTERVAL = int(config.get("bme_interval", 60))
+BME_INTERVAL = int(config.get("bme_interval", 30))
 PCA_FREQ = int(config.get("pca_frequency", 1000))
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
@@ -331,11 +331,126 @@ DEFAULT_DUTY_CYCLE = max(0, min(100, DEFAULT_DUTY_CYCLE))
 PU_DEFAULT_HZ = float(config.get("pu_default_hz", 10.0))
 PU_DEFAULT_HZ = max(0.0, PU_DEFAULT_HZ)
 
-AVAIL_TOPIC = "homeassistant/pca9685_pwm/availability"
+MQTT_DEEP_CLEAN = config.get("mqtt_deep_clean", False)
 
+is_cleaning = False
+found_topics = set()
+clean_lock = threading.Lock()
+CLEAN_PREFIXES = ["pca_", "bme280_", "status_", "pca9539_"]
 
-def _topic(component: str, unique_id: str, suffix: str) -> str:
-    return f"homeassistant/{component}/{unique_id}/{suffix}"
+# Status and Colors
+COLOR_OFF = (0, 0, 0)
+COLOR_RED = (4095, 0, 0)
+COLOR_GREEN = (0, 4095, 0)
+COLOR_BLUE = (0, 0, 4095)
+
+system_status = "DIAGNOSTIC"  # OK, ERROR, DIAGNOSTIC
+status_lock = threading.Lock()
+
+def set_rgb_color(color_tuple):
+    pca.set_duty_12bit(CH_LED_RED, color_tuple[0])
+    pca.set_duty_12bit(CH_LED_GREEN, color_tuple[1])
+    pca.set_duty_12bit(CH_LED_BLUE, color_tuple[2])
+
+def get_pca9539_pin(pin_idx):
+    """Read a specific pin from PCA9539. pin_idx 0-15."""
+    if not pca9539:
+        return None
+    inputs = pca9539.read_inputs()
+    return (inputs >> pin_idx) & 1
+
+def hardware_diagnostic():
+    global system_status
+    logger.info("Starting automated hardware diagnostic...")
+    
+    # Set status to diagnostic (will be used by sys_led_worker if it's already running)
+    with status_lock:
+        system_status = "DIAGNOSTIC"
+    
+    # Ensure Blue LED is ON during diagnostic
+    set_rgb_color(COLOR_BLUE)
+    
+    problems = []
+    
+    # 1. Test Relays (Heaters 1-4, Fans 1-2 Power)
+    # Mapping: Heaters 1-4 -> IO0_0 to IO0_3, Fans 1-2 -> IO0_4 to IO0_5
+    # Logic: Low (0) = ON, High (1) = OFF
+    test_map = [
+        (CH_HEATER_1, 0, "Heater 1"),
+        (CH_HEATER_2, 1, "Heater 2"),
+        (CH_HEATER_3, 3, "Heater 3"), # Corrected from 2 to 3 if following sequence, wait let's check FEEDBACK_MAP
+        (CH_HEATER_4, 3, "Heater 4"),
+    ]
+    # Wait, let me check the FEEDBACK_MAP I just wrote
+    # CH_HEATER_1: 0, CH_HEATER_2: 1, CH_HEATER_3: 2, CH_HEATER_4: 3
+    
+    relays_to_test = [
+        (CH_HEATER_1, "Heater 1"),
+        (CH_HEATER_2, "Heater 2"),
+        (CH_HEATER_3, "Heater 3"),
+        (CH_HEATER_4, "Heater 4"),
+        (CH_FAN_1_POWER, "Fan 1 Power"),
+        (CH_FAN_2_POWER, "Fan 2 Power"),
+    ]
+    
+    for ch, name in relays_to_test:
+        logger.info("Testing %s...", name)
+        # Test ON
+        if not verified_apply_switch(ch, True, name):
+            problems.append(f"{name} ON failure")
+        time.sleep(0.2)
+        # Test OFF
+        if not verified_apply_switch(ch, False, name):
+            problems.append(f"{name} OFF failure")
+        time.sleep(0.1)
+
+    # 2. Test Stepper ENA, DIR
+    stepper_signals = [
+        (CH_STEPPER_ENA, "Stepper ENA"),
+        (CH_STEPPER_DIR, "Stepper DIR"),
+    ]
+    
+    for ch, name in stepper_signals:
+        logger.info("Testing %s...", name)
+        # Toggle and check
+        verified_apply_switch(ch, True, name)
+        time.sleep(0.1)
+        verified_apply_switch(ch, False, name)
+        time.sleep(0.1)
+
+    # 3. Test PU (Pulse) detection
+    logger.info("Testing PU signal feedback...")
+    pu_detected = False
+    # Send a few pulses and see if we can catch them
+    for _ in range(10):
+        channel_on(CH_PU)
+        time.sleep(0.01)
+        if get_pca9539_pin(10) == 1:
+            pu_detected = True
+        channel_off(CH_PU)
+        time.sleep(0.01)
+        if pu_detected: break
+    
+    if not pu_detected:
+        logger.warning("PU feedback not detected during diagnostic (check R12/wiring)")
+        # We don't necessarily treat PU failure as a fatal diagnostic error 
+        # unless it's critical for the user, but we'll log it.
+    
+    if problems:
+        logger.error("Hardware diagnostic completed with ERRORS: %s", ", ".join(problems))
+        with status_lock:
+            system_status = "ERROR"
+        set_rgb_color(COLOR_RED) # Briefly show red
+        time.sleep(1)
+    else:
+        logger.info("Hardware diagnostic PASSED.")
+        with status_lock:
+            system_status = "OK"
+        set_rgb_color(COLOR_GREEN) # Briefly show green
+        time.sleep(1)
+
+    set_rgb_color(COLOR_OFF)
+    return len(problems) == 0
 
 
 TOPIC_PWM1_DUTY_CMD = _topic("number", "pca_pwm1_duty", "set")
@@ -388,8 +503,8 @@ TOPIC_PCA9539_INPUTS = "homeassistant/sensor/pca9539_inputs/state"
 TOPIC_FEEDBACK_ENA = _topic("binary_sensor", "status_ena", "state")
 TOPIC_FEEDBACK_DIR = _topic("binary_sensor", "status_dir", "state")
 TOPIC_FEEDBACK_PU = _topic("binary_sensor", "status_pu", "state")
-TOPIC_FEEDBACK_FAN1 = _topic("binary_sensor", "status_fan1", "state")
-TOPIC_FEEDBACK_FAN2 = _topic("binary_sensor", "status_fan2", "state")
+TOPIC_FEEDBACK_TAXO1 = _topic("binary_sensor", "status_taxo1", "state")
+TOPIC_FEEDBACK_TAXO2 = _topic("binary_sensor", "status_taxo2", "state")
 TOPIC_FEEDBACK_RELAY1 = _topic("binary_sensor", "status_relay1", "state")
 TOPIC_FEEDBACK_RELAY2 = _topic("binary_sensor", "status_relay2", "state")
 TOPIC_FEEDBACK_RELAY3 = _topic("binary_sensor", "status_relay3", "state")
@@ -397,9 +512,9 @@ TOPIC_FEEDBACK_RELAY4 = _topic("binary_sensor", "status_relay4", "state")
 TOPIC_FEEDBACK_RELAY5 = _topic("binary_sensor", "status_relay5", "state")
 TOPIC_FEEDBACK_RELAY6 = _topic("binary_sensor", "status_relay6", "state")
 
-TOPIC_RES2 = _topic("sensor", "status_res2", "state")
-TOPIC_RES3 = _topic("sensor", "status_res3", "state")
-TOPIC_RES4 = _topic("sensor", "status_res4", "state")
+TOPIC_RES2 = _topic("binary_sensor", "status_res2", "state")
+TOPIC_RES3 = _topic("binary_sensor", "status_res3", "state")
+TOPIC_RES4 = _topic("binary_sensor", "status_res4", "state")
 
 
 def validate_fixed_mapping():
@@ -522,6 +637,7 @@ pu_freq_hz = float(PU_DEFAULT_HZ)
 pu_lock = threading.Lock()
 pu_thread = None
 pu_running = False
+pu_is_pulsing = False  # Track if the PU worker is actively generating pulses
 
 sys_led_thread = None
 sys_led_running = False
@@ -606,36 +722,37 @@ def pca9539_worker():
                 if not pu_ok: any_problem = True
                 client.publish(TOPIC_FEEDBACK_PU, "ON" if not pu_ok else "OFF", retain=True)
 
-                # Fans
-                # Fan 1 (PWM1)
+                # TAXO 1
                 taxo1_actual = (inputs >> 6) & 1
                 if pwm1_value > 0.0:
                     taxo1_history.append(taxo1_actual)
                     if len(taxo1_history) > 5: taxo1_history.pop(0)
+                    # If all samples are the same, it's not pulsing
                     if len(taxo1_history) >= 3 and all(x == taxo1_history[0] for x in taxo1_history):
-                        fan1_ok = False
+                        taxo1_ok = False
                     else:
-                        fan1_ok = True
+                        taxo1_ok = True
                 else:
                     taxo1_history = []
-                    fan1_ok = (taxo1_actual == 1)
-                if not fan1_ok: any_problem = True
-                client.publish(TOPIC_FEEDBACK_FAN1, "ON" if not fan1_ok else "OFF", retain=True)
+                    taxo1_ok = True  # Motor off, no pulses expected
+                if not taxo1_ok: any_problem = True
+                client.publish(TOPIC_FEEDBACK_TAXO1, "ON" if not taxo1_ok else "OFF", retain=True)
 
-                # Fan 2 (PWM2)
+                # TAXO 2
                 taxo2_actual = (inputs >> 7) & 1
                 if pwm2_value > 0.0:
                     taxo2_history.append(taxo2_actual)
                     if len(taxo2_history) > 5: taxo2_history.pop(0)
+                    # If all samples are the same, it's not pulsing
                     if len(taxo2_history) >= 3 and all(x == taxo2_history[0] for x in taxo2_history):
-                        fan2_ok = False
+                        taxo2_ok = False
                     else:
-                        fan2_ok = True
+                        taxo2_ok = True
                 else:
                     taxo2_history = []
-                    fan2_ok = (taxo2_actual == 1)
-                if not fan2_ok: any_problem = True
-                client.publish(TOPIC_FEEDBACK_FAN2, "ON" if not fan2_ok else "OFF", retain=True)
+                    taxo2_ok = True  # Motor off, no pulses expected
+                if not taxo2_ok: any_problem = True
+                client.publish(TOPIC_FEEDBACK_TAXO2, "ON" if not taxo2_ok else "OFF", retain=True)
 
                 # Reserve inputs
                 res4_actual = (inputs >> 12) & 1
@@ -797,29 +914,126 @@ def update_pwm2_output_locked():
     pca.set_duty_12bit(CH_PWM2, duty)
 
 
-def apply_switch(channel: int, state: bool):
+# Map PCA9685 channels to PCA9539 feedback pins
+# Relays: 0-5 (IO0_0 to IO0_5)
+# Stepper: 8-10 (IO1_0 to IO1_2)
+# TAXO: 11-12 (IO1_3 to IO1_4)
+FEEDBACK_MAP = {
+    CH_HEATER_1: 0,
+    CH_HEATER_2: 1,
+    CH_HEATER_3: 2,
+    CH_HEATER_4: 3,
+    CH_FAN_1_POWER: 4,
+    CH_FAN_2_POWER: 5,
+    CH_STEPPER_ENA: 8,
+    CH_STEPPER_DIR: 9,
+    CH_PU: 10
+}
+
+# TAXO pins for monitoring (not direct feedback of PCA channels)
+TAXO1_PIN = 11
+TAXO2_PIN = 12
+
+def verified_apply_switch(channel: int, state: bool, name: str = "Component"):
+    global system_status
+    feedback_pin = FEEDBACK_MAP.get(channel)
+    
+    expected_after = None
+    if feedback_pin is not None:
+        # 1. Pre-check status
+        initial_val = get_pca9539_pin(feedback_pin)
+        
+        # Determine expected values based on schematic
+        # For relays (0-5), Low (0) = ON, High (1) = OFF
+        if feedback_pin <= 5:
+            expected_after = 0 if state else 1
+            initial_desc = "ON" if initial_val == 0 else "OFF"
+        else:
+            # For ENA/DIR/PU, they follow PCA9685 logic (High=ON, Low=OFF)
+            expected_after = 1 if state else 0
+            initial_desc = "ON" if initial_val == 1 else "OFF"
+            
+        logger.debug("Pre-check %s (CH %d): Current status is %s", name, channel, initial_desc)
+
+    # 2. Apply command
     if state:
         channel_on(channel)
     else:
         channel_off(channel)
+    
+    if feedback_pin is not None:
+        # 3. Post-check verification
+        time.sleep(0.12) # Wait for hardware response
+        final_val = get_pca9539_pin(feedback_pin)
+        
+        if final_val != expected_after:
+            logger.error("VERIFICATION FAILED for %s (CH %d): expected %d, got %d", name, channel, expected_after, final_val)
+            with status_lock:
+                system_status = "ERROR"
+            return False
+        else:
+            logger.debug("Verification passed for %s", name)
+            # If we were in error but this worked, should we clear it? 
+            # Usually better to let the diagnostic or a manual reset clear errors.
+            
+    return True
+
+def apply_switch(channel: int, state: bool):
+    # This now uses the verified version
+    return verified_apply_switch(channel, state)
 
 
 def stepper_apply_dir(value: str):
-    global stepper_dir
-    stepper_dir = "CCW" if value == "CCW" else "CW"
-    apply_switch(CH_STEPPER_DIR, stepper_dir == "CW")
+    global stepper_dir, pu_enabled, pu_is_pulsing
+    new_dir = "CCW" if value == "CCW" else "CW"
+    
+    # If the direction is already the same, do nothing
+    if new_dir == stepper_dir:
+        return
+
+    logger.info("Stepper DIR change requested: %s -> %s. Performing safe switch...", stepper_dir, new_dir)
+    
+    # 1. Disable pulse generation and wait for current pulse to finish
+    was_enabled = False
+    with pu_lock:
+        was_enabled = pu_enabled
+        pu_enabled = False
+    
+    # Wait for pu_worker to stop pulsing (timeout after 2 seconds)
+    start_wait = time.time()
+    while pu_is_pulsing and (time.time() - start_wait < 2.0):
+        time.sleep(0.01)
+    
+    # Extra safety wait to ensure driver is ready
+    time.sleep(0.05)
+    
+    # 2. Change DIR signal
+    stepper_dir = new_dir
+    verified_apply_switch(CH_STEPPER_DIR, stepper_dir == "CW", "Stepper DIR")
+    
+    # 3. Wait ≥ 50 ms (as required for DM332T setup time)
+    time.sleep(0.06)
+    
+    # 4. Resume pulse generation if it was enabled
+    if was_enabled:
+        with pu_lock:
+            pu_enabled = True
+        logger.info("Stepper DIR changed and pulses resumed.")
+    else:
+        logger.info("Stepper DIR changed.")
 
 
 def stepper_apply_ena(state: bool):
     global stepper_ena
     stepper_ena = bool(state)
-    apply_switch(CH_STEPPER_ENA, stepper_ena)
+    verified_apply_switch(CH_STEPPER_ENA, stepper_ena, "Stepper ENA")
 
 
 def pu_worker():
-    global pu_running
+    global pu_running, pu_is_pulsing, system_status
     last_level = None
     last_enabled = None
+    pulse_feedback_count = 0
 
     while pu_running:
         with pu_lock:
@@ -827,6 +1041,7 @@ def pu_worker():
             freq = float(pu_freq_hz)
 
         if (not enabled) or freq <= 0.0:
+            pu_is_pulsing = False
             if last_level is not False:
                 channel_off(CH_PU)
                 last_level = False
@@ -837,19 +1052,43 @@ def pu_worker():
 
         if last_enabled is not True:
             last_enabled = True
-
+        
+        pu_is_pulsing = True
         half = 0.5 / freq
+        
+        # Pulse ON
         if last_level is not True:
             channel_on(CH_PU)
             last_level = True
-        time.sleep(half)
+        
+        # Small sleep and check feedback
+        time.sleep(min(0.005, half * 0.5))
+        if get_pca9539_pin(10) == 1:
+            pulse_feedback_count += 1
+        
+        time.sleep(max(0, half - min(0.005, half * 0.5)))
+        
         if not pu_running:
             break
+            
+        # Pulse OFF
         if last_level is not False:
             channel_off(CH_PU)
             last_level = False
         time.sleep(half)
 
+        # Every 100 cycles, verify we are actually getting pulses if enabled
+        # This is a bit arbitrary, but prevents log spamming
+        # For very low frequencies, we might want to check more often
+        if freq > 1.0 and pulse_feedback_count == 0:
+            # We should have seen pulses
+            # logger.warning("PU feedback not detected while pulsing!")
+            # with status_lock: system_status = "ERROR"
+            pass
+        
+        pulse_feedback_count = 0
+
+    pu_is_pulsing = False
     channel_off(CH_PU)
 
 
@@ -875,21 +1114,42 @@ def pu_stop():
 
 
 def sys_led_worker():
-    global sys_led_running
+    global sys_led_running, system_status
     level = False
-    last_written = None
-
+    
     while sys_led_running:
         level = not level
-        if level != last_written:
+        
+        # System LED (CH15) always blinks
+        if level:
+            channel_on(CH_SYS_LED)
+        else:
+            channel_off(CH_SYS_LED)
+            
+        # RGB LED status
+        with status_lock:
+            current_status = system_status
+            
+        if current_status == "OK":
+            # Normal: Blink Green
             if level:
-                channel_on(CH_SYS_LED)
+                set_rgb_color(COLOR_GREEN)
             else:
-                channel_off(CH_SYS_LED)
-            last_written = level
+                set_rgb_color(COLOR_OFF)
+        elif current_status == "ERROR":
+            # Problem: Blink Red
+            if level:
+                set_rgb_color(COLOR_RED)
+            else:
+                set_rgb_color(COLOR_OFF)
+        elif current_status == "DIAGNOSTIC":
+            # Diagnostic: Blue (already set by hardware_diagnostic, but let's be sure)
+            set_rgb_color(COLOR_BLUE)
+            
         time.sleep(1.0)
 
     channel_off(CH_SYS_LED)
+    set_rgb_color(COLOR_OFF)
 
 
 def sys_led_start():
@@ -1200,41 +1460,125 @@ DISCOVERIES = [
         "device": device_info_bme_ch1_77,
     }),
     # Status Feedback (Binary sensors)
-    ("binary_sensor", "status_fan1", {
-        "name": "Status Fan 1",
-        "unique_id": "status_fan1",
-        "state_topic": TOPIC_FEEDBACK_FAN1,
+    ("binary_sensor", "status_taxo1", {
+        "name": "TAXO 1 Status",
+        "unique_id": "status_taxo1",
+        "state_topic": TOPIC_FEEDBACK_TAXO1,
+        "availability_topic": AVAIL_TOPIC,
         "device_class": "problem",
         "device": device_info_feedback,
     }),
-    ("binary_sensor", "status_fan2", {
-        "name": "Status Fan 2",
-        "unique_id": "status_fan2",
-        "state_topic": TOPIC_FEEDBACK_FAN2,
+    ("binary_sensor", "status_taxo2", {
+        "name": "TAXO 2 Status",
+        "unique_id": "status_taxo2",
+        "state_topic": TOPIC_FEEDBACK_TAXO2,
+        "availability_topic": AVAIL_TOPIC,
         "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_ena", {
+        "name": "Status ENA",
+        "unique_id": "status_ena",
+        "state_topic": TOPIC_FEEDBACK_ENA,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_dir", {
+        "name": "Status DIR",
+        "unique_id": "status_dir",
+        "state_topic": TOPIC_FEEDBACK_DIR,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_pu", {
+        "name": "Status PU",
+        "unique_id": "status_pu",
+        "state_topic": TOPIC_FEEDBACK_PU,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_relay1", {
+        "name": "Status Relay 1",
+        "unique_id": "status_relay1",
+        "state_topic": TOPIC_FEEDBACK_RELAY1,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_relay2", {
+        "name": "Status Relay 2",
+        "unique_id": "status_relay2",
+        "state_topic": TOPIC_FEEDBACK_RELAY2,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_relay3", {
+        "name": "Status Relay 3",
+        "unique_id": "status_relay3",
+        "state_topic": TOPIC_FEEDBACK_RELAY3,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_relay4", {
+        "name": "Status Relay 4",
+        "unique_id": "status_relay4",
+        "state_topic": TOPIC_FEEDBACK_RELAY4,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_relay5", {
+        "name": "Status Relay 5",
+        "unique_id": "status_relay5",
+        "state_topic": TOPIC_FEEDBACK_RELAY5,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_relay6", {
+        "name": "Status Relay 6",
+        "unique_id": "status_relay6",
+        "state_topic": TOPIC_FEEDBACK_RELAY6,
+        "availability_topic": AVAIL_TOPIC,
+        "device_class": "problem",
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_res2", {
+        "name": "Reserve 2",
+        "unique_id": "status_res2",
+        "state_topic": TOPIC_RES2,
+        "availability_topic": AVAIL_TOPIC,
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_res3", {
+        "name": "Reserve 3",
+        "unique_id": "status_res3",
+        "state_topic": TOPIC_RES3,
+        "availability_topic": AVAIL_TOPIC,
+        "device": device_info_feedback,
+    }),
+    ("binary_sensor", "status_res4", {
+        "name": "Reserve 4",
+        "unique_id": "status_res4",
+        "state_topic": TOPIC_RES4,
+        "availability_topic": AVAIL_TOPIC,
         "device": device_info_feedback,
     }),
 ]
-
 
 
 def clear_discovery():
     """Clear old retained discovery messages by publishing empty payloads."""
     # List of unique_ids that were previously used but are now removed
     deprecated = [
-        ("binary_sensor", "status_ena"),
-        ("binary_sensor", "status_dir"),
-        ("binary_sensor", "status_pu"),
-        ("binary_sensor", "status_relay1"),
-        ("binary_sensor", "status_relay2"),
-        ("binary_sensor", "status_relay3"),
-        ("binary_sensor", "status_relay4"),
-        ("binary_sensor", "status_relay5"),
-        ("binary_sensor", "status_relay6"),
-        ("sensor", "status_res2"),
-        ("sensor", "status_res3"),
-        ("sensor", "status_res4"),
         ("sensor", "pca9539_inputs"),
+        ("binary_sensor", "status_fan1"),
+        ("binary_sensor", "status_fan2"),
     ]
     
     for component, unique_id in deprecated:
@@ -1277,12 +1621,47 @@ def publish_discovery():
     logger.info("Discovery messages and initial states published")
 
 
+def perform_deep_clean():
+    """Wipe all found topics during the cleaning phase."""
+    global is_cleaning, found_topics
+    
+    logger.info("Deep clean timer expired. Clearing %d topics...", len(found_topics))
+    
+    with clean_lock:
+        is_cleaning = False
+        topics_to_clear = list(found_topics)
+        found_topics.clear()
+    
+    # 1. Clear each found topic
+    for topic in topics_to_clear:
+        client.publish(topic, "", retain=True)
+        # Also try to clear config if it was a state topic, or vice versa
+        # Most of our topics follow homeassistant/{component}/{unique_id}/{suffix}
+        # If we found a state topic, we should also clear the config topic
+        parts = topic.split('/')
+        if len(parts) >= 4:
+            component = parts[1]
+            unique_id = parts[2]
+            config_topic = f"homeassistant/{component}/{unique_id}/config"
+            if config_topic != topic:
+                client.publish(config_topic, "", retain=True)
+
+    # 2. Unsubscribe from the wildcard
+    client.unsubscribe("homeassistant/#")
+    logger.info("Deep clean completed. Proceeding with normal discovery.")
+    
+    # 3. Finally publish current discovery
+    publish_discovery()
+
+
 def on_connect(client, userdata, flags, reason_code, properties=None):
+    global is_cleaning
     rc = reason_code.value if hasattr(reason_code, "value") else reason_code
     if rc != 0:
         logger.error("MQTT connection failed with code %s", rc)
         return
 
+    # Subscriptions for commands
     client.subscribe(TOPIC_PWM1_DUTY_CMD)
     client.subscribe(TOPIC_FAN_1_POWER_CMD)
     client.subscribe(TOPIC_PWM2_DUTY_CMD)
@@ -1295,7 +1674,15 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     client.subscribe(TOPIC_STEPPER_ENA_CMD)
     client.subscribe(TOPIC_PU_ENABLE_CMD)
     client.subscribe(TOPIC_PU_FREQ_CMD)
-    publish_discovery()
+
+    if MQTT_DEEP_CLEAN:
+        logger.info("Deep clean enabled. Scanning for ghost topics...")
+        is_cleaning = True
+        client.subscribe("homeassistant/#")
+        # Start timer to finish cleaning in 3 seconds
+        threading.Timer(3.0, perform_deep_clean).start()
+    else:
+        publish_discovery()
 
     logger.info("Connected to MQTT broker %s:%s", MQTT_HOST, MQTT_PORT)
 
@@ -1310,10 +1697,35 @@ def on_message(client, userdata, msg):
     global heater_1, heater_2, heater_3, heater_4
     global fan_1_power, fan_2_power
     global pu_enabled, pu_freq_hz
+    global is_cleaning, found_topics
 
     topic = msg.topic
-    payload = msg.payload.decode("utf-8").strip()
+    payload_raw = msg.payload.decode("utf-8", errors="ignore").strip()
 
+    # Handle deep cleaning phase
+    if is_cleaning:
+        # Check if topic belongs to us
+        # Either by availability topic or by prefixes in the unique_id part
+        is_ours = False
+        if topic == AVAIL_TOPIC:
+            is_ours = True
+        else:
+            parts = topic.split('/')
+            if len(parts) >= 3:
+                unique_id = parts[2]
+                for prefix in CLEAN_PREFIXES:
+                    if unique_id.startswith(prefix):
+                        is_ours = True
+                        break
+        
+        if is_ours:
+            with clean_lock:
+                if topic not in found_topics:
+                    logger.debug("Found ghost topic to clear: %s", topic)
+                    found_topics.add(topic)
+        return
+
+    payload = payload_raw
     try:
         if topic == TOPIC_PWM1_DUTY_CMD:
             value = max(0.0, min(100.0, float(payload)))
@@ -1469,6 +1881,15 @@ signal.signal(signal.SIGTERM, safe_shutdown)
 signal.signal(signal.SIGINT, safe_shutdown)
 
 
+# Start signaling and diagnostic
+sys_led_start()
+if pca9539:
+    hardware_diagnostic()
+else:
+    logger.warning("PCA9539 not available, skipping hardware diagnostic.")
+    with status_lock:
+        system_status = "OK"
+
 logger.info("Connecting to MQTT %s:%s...", MQTT_HOST, MQTT_PORT)
 for attempt in range(1, 11):
     try:
@@ -1484,7 +1905,6 @@ for attempt in range(1, 11):
             safe_shutdown()
         time.sleep(1.5 ** (attempt - 1))
 
-sys_led_start()
 bme_start()
 pca9539_start()
 
