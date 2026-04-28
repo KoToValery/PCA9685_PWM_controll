@@ -323,6 +323,8 @@ PCA_ADDR = int(config["pca_address"], 16)
 PCA9539_ADDR = int(config.get("pca9539_address", "0x74"), 16)
 PCA9540_ADDR = int(config.get("pca9540_address", "0x70"), 16)
 BME_INTERVAL = int(config.get("bme_interval", 30))
+LED_INDICATOR_INTERVAL = int(config.get("led_indicator_interval", 30))
+LED_INDICATOR_ON_DURATION = 5  # seconds to show indicator
 PCA_FREQ = int(config.get("pca_frequency", 1000))
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
@@ -442,18 +444,17 @@ def hardware_diagnostic():
     
     if problems:
         logger.error("Hardware diagnostic completed with ERRORS: %s", ", ".join(problems))
-        with status_lock:
-            system_status = "ERROR"
         set_rgb_color(COLOR_RED)
         time.sleep(5)
     else:
         logger.info("Hardware diagnostic PASSED.")
-        with status_lock:
-            system_status = "OK"
         set_rgb_color(COLOR_GREEN)
         time.sleep(5)
 
     set_rgb_color(COLOR_OFF)
+    # Always set system_status to OK after diagnostic so led_indicator uses any_problem_realtime
+    with status_lock:
+        system_status = "OK"
     return len(problems) == 0
 
 
@@ -655,6 +656,9 @@ sys_led_thread = None
 sys_led_running = False
 sys_led_lock = threading.Lock()
 
+led_indicator_thread = None
+led_indicator_running = False
+led_indicator_lock = threading.Lock()
 
 bme_thread = None
 bme_running = False
@@ -1119,8 +1123,7 @@ def pu_stop():
 
 
 def sys_led_worker():
-    global sys_led_running, system_status
-    global any_problem_realtime
+    global sys_led_running
     level = False
 
     while sys_led_running:
@@ -1132,45 +1135,9 @@ def sys_led_worker():
         else:
             channel_off(CH_SYS_LED)
 
-        # RGB LED status
-        with status_lock:
-            current_status = system_status
-        with any_problem_lock:
-            has_problem = any_problem_realtime
-
-        if current_status == "DIAGNOSTIC":
-            # Diagnostic: Blue (always blue during diagnostic, ignore any_problem_realtime)
-            set_rgb_color(COLOR_BLUE)
-        elif has_problem:
-            # Real-time problem detected: Blink Red
-            if level:
-                set_rgb_color(COLOR_RED)
-            else:
-                set_rgb_color(COLOR_OFF)
-            # Ensure system_status reflects the error
-            if current_status != "ERROR":
-                with status_lock:
-                    system_status = "ERROR"
-        elif current_status == "ERROR":
-            # Status was ERROR but no current problem detected -> auto-clear to OK
-            with status_lock:
-                system_status = "OK"
-            # Blink Green
-            if level:
-                set_rgb_color(COLOR_GREEN)
-            else:
-                set_rgb_color(COLOR_OFF)
-        elif current_status == "OK":
-            # Normal: Blink Green
-            if level:
-                set_rgb_color(COLOR_GREEN)
-            else:
-                set_rgb_color(COLOR_OFF)
-
         time.sleep(1.0)
 
     channel_off(CH_SYS_LED)
-    set_rgb_color(COLOR_OFF)
 
 
 def sys_led_start():
@@ -1192,6 +1159,65 @@ def sys_led_stop():
         sys_led_thread.join(timeout=2)
     sys_led_thread = None
     channel_off(CH_SYS_LED)
+
+
+def led_indicator_worker():
+    global led_indicator_running
+    while led_indicator_running:
+        with any_problem_lock:
+            has_problem = any_problem_realtime
+
+        if has_problem:
+            # Blink red for LED_INDICATOR_ON_DURATION seconds
+            start = time.time()
+            while time.time() - start < LED_INDICATOR_ON_DURATION:
+                if not led_indicator_running:
+                    break
+                set_rgb_color(COLOR_RED)
+                time.sleep(0.5)
+                if not led_indicator_running:
+                    break
+                set_rgb_color(COLOR_OFF)
+                time.sleep(0.5)
+        else:
+            # Solid green for LED_INDICATOR_ON_DURATION seconds
+            set_rgb_color(COLOR_GREEN)
+            start = time.time()
+            while time.time() - start < LED_INDICATOR_ON_DURATION:
+                if not led_indicator_running:
+                    break
+                time.sleep(0.5)
+
+        # Turn off LED for the rest of the interval
+        set_rgb_color(COLOR_OFF)
+        sleep_until = time.time() + (LED_INDICATOR_INTERVAL - LED_INDICATOR_ON_DURATION)
+        while time.time() < sleep_until:
+            if not led_indicator_running:
+                break
+            time.sleep(0.5)
+
+    set_rgb_color(COLOR_OFF)
+
+
+def led_indicator_start():
+    global led_indicator_thread, led_indicator_running
+    with led_indicator_lock:
+        if led_indicator_thread and led_indicator_thread.is_alive():
+            return
+        led_indicator_running = True
+        led_indicator_thread = threading.Thread(target=led_indicator_worker, daemon=True)
+        led_indicator_thread.start()
+    logger.info("LED indicator started (interval=%ds, on_duration=%ds)", LED_INDICATOR_INTERVAL, LED_INDICATOR_ON_DURATION)
+
+
+def led_indicator_stop():
+    global led_indicator_thread, led_indicator_running
+    with led_indicator_lock:
+        led_indicator_running = False
+    if led_indicator_thread and led_indicator_thread.is_alive():
+        led_indicator_thread.join(timeout=2)
+    led_indicator_thread = None
+    set_rgb_color(COLOR_OFF)
 
 
 try:
@@ -1860,6 +1886,7 @@ def safe_shutdown(signum=None, frame=None):
         bme_stop()
         pca9539_stop()
         sys_led_stop()
+        led_indicator_stop()
         pu_stop()
 
         with pwm1_lock:
@@ -1928,6 +1955,7 @@ for attempt in range(1, 11):
 
 bme_start()
 pca9539_start()
+led_indicator_start()
 
 logger.info("Service running")
 logger.setLevel(logging.ERROR)

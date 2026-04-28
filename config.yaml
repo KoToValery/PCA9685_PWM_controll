@@ -38,6 +38,7 @@ options:
   default_duty_cycle: 30
   pu_default_hz: 100.0
   mqtt_deep_clean: false
+  led_indicator_interval: 30
 schema:
   mqtt_host: str
   mqtt_port: port
@@ -52,3 +53,4 @@ schema:
   pca_frequency: int(24,1526)
   default_duty_cycle: int(0,100)
   pu_default_hz: float?
+  led_indicator_interval: int(5,300)?
