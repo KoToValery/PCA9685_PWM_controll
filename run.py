@@ -788,6 +788,8 @@ def pca9539_worker():
                 # Update real-time problem status for sys_led_worker
                 with any_problem_lock:
                     any_problem_realtime = any_problem
+                
+                logger.info("[PCA9539] any_problem=%s, heater_1=%s", any_problem, heater_1)
 
             except Exception as e:
                 logger.error("PCA9539 read error: %s", e)
@@ -1166,6 +1168,8 @@ def led_indicator_worker():
     while led_indicator_running:
         with any_problem_lock:
             has_problem = any_problem_realtime
+        
+        logger.info("[LED_INDICATOR] has_problem=%s, will show %s", has_problem, "RED" if has_problem else "GREEN")
 
         if has_problem:
             # Blink red for LED_INDICATOR_ON_DURATION seconds
