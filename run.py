@@ -1319,7 +1319,12 @@ DISCOVERIES = [
         "step": 1,
         "unit_of_measurement": "%",
         "mode": "slider",
-        "device": device_info_fans,
+        "device": {
+            **device_info_fans,
+            "identifiers": ["pca9685_fan_1"],
+            "name": "FAN 1",
+        },
+        "via_device": device_info_fans["identifiers"][0],
     }, "0"),
     ("switch", "pca_fan_1_power", {
         "name": "FAN 1 Power",
@@ -1360,7 +1365,12 @@ DISCOVERIES = [
         "step": 1,
         "unit_of_measurement": "%",
         "mode": "slider",
-        "device": device_info_fans,
+        "device": {
+            **device_info_fans,
+            "identifiers": ["pca9685_fan_2"],
+            "name": "FAN 2",
+        },
+        "via_device": device_info_fans["identifiers"][0],
     }, "0"),
     ("switch", "pca_fan_2_power", {
         "name": "FAN 2 Power",
@@ -1398,12 +1408,7 @@ DISCOVERIES = [
         "availability_topic": AVAIL_TOPIC,
         "payload_on": "ON",
         "payload_off": "OFF",
-        "device": {
-            **device_info_heaters,
-            "identifiers": ["pca9685_heater_1"],
-            "name": "Heater 1",
-        },
-        "via_device": device_info_heaters["identifiers"][0],
+        "device": device_info_heaters,
     }, "OFF"),
     ("binary_sensor", "status_heater_1", {
         "name": "Heater 1 Status",
@@ -1411,12 +1416,7 @@ DISCOVERIES = [
         "state_topic": TOPIC_FEEDBACK_RELAY1,
         "availability_topic": AVAIL_TOPIC,
         "device_class": "problem",
-        "device": {
-            **device_info_heaters,
-            "identifiers": ["pca9685_heater_1"],
-            "name": "Heater 1",
-        },
-        "via_device": device_info_heaters["identifiers"][0],
+        "device": device_info_heaters,
     }),
     ("switch", "pca_heater_2", {
         "name": "Heater 2",
@@ -1426,12 +1426,7 @@ DISCOVERIES = [
         "availability_topic": AVAIL_TOPIC,
         "payload_on": "ON",
         "payload_off": "OFF",
-        "device": {
-            **device_info_heaters,
-            "identifiers": ["pca9685_heater_2"],
-            "name": "Heater 2",
-        },
-        "via_device": device_info_heaters["identifiers"][0],
+        "device": device_info_heaters,
     }, "OFF"),
     ("binary_sensor", "status_heater_2", {
         "name": "Heater 2 Status",
@@ -1439,12 +1434,7 @@ DISCOVERIES = [
         "state_topic": TOPIC_FEEDBACK_RELAY2,
         "availability_topic": AVAIL_TOPIC,
         "device_class": "problem",
-        "device": {
-            **device_info_heaters,
-            "identifiers": ["pca9685_heater_2"],
-            "name": "Heater 2",
-        },
-        "via_device": device_info_heaters["identifiers"][0],
+        "device": device_info_heaters,
     }),
     ("switch", "pca_heater_3", {
         "name": "Heater 3",
@@ -1454,12 +1444,7 @@ DISCOVERIES = [
         "availability_topic": AVAIL_TOPIC,
         "payload_on": "ON",
         "payload_off": "OFF",
-        "device": {
-            **device_info_heaters,
-            "identifiers": ["pca9685_heater_3"],
-            "name": "Heater 3",
-        },
-        "via_device": device_info_heaters["identifiers"][0],
+        "device": device_info_heaters,
     }, "OFF"),
     ("binary_sensor", "status_heater_3", {
         "name": "Heater 3 Status",
@@ -1467,12 +1452,7 @@ DISCOVERIES = [
         "state_topic": TOPIC_FEEDBACK_RELAY3,
         "availability_topic": AVAIL_TOPIC,
         "device_class": "problem",
-        "device": {
-            **device_info_heaters,
-            "identifiers": ["pca9685_heater_3"],
-            "name": "Heater 3",
-        },
-        "via_device": device_info_heaters["identifiers"][0],
+        "device": device_info_heaters,
     }),
     ("switch", "pca_heater_4", {
         "name": "Heater 4",
@@ -1482,12 +1462,7 @@ DISCOVERIES = [
         "availability_topic": AVAIL_TOPIC,
         "payload_on": "ON",
         "payload_off": "OFF",
-        "device": {
-            **device_info_heaters,
-            "identifiers": ["pca9685_heater_4"],
-            "name": "Heater 4",
-        },
-        "via_device": device_info_heaters["identifiers"][0],
+        "device": device_info_heaters,
     }, "OFF"),
     ("binary_sensor", "status_heater_4", {
         "name": "Heater 4 Status",
@@ -1495,12 +1470,7 @@ DISCOVERIES = [
         "state_topic": TOPIC_FEEDBACK_RELAY4,
         "availability_topic": AVAIL_TOPIC,
         "device_class": "problem",
-        "device": {
-            **device_info_heaters,
-            "identifiers": ["pca9685_heater_4"],
-            "name": "Heater 4",
-        },
-        "via_device": device_info_heaters["identifiers"][0],
+        "device": device_info_heaters,
     }),
     ("select", "pca_stepper_dir", {
         "name": "DIR",
@@ -1604,7 +1574,6 @@ DISCOVERIES = [
         "via_device": device_info_stepper["identifiers"][0],
     }, None),  # Will handle pu_freq_hz dynamically
     # BME280 CH0 0x76
-    ("sensor", "bme280_ch0_0x76_temperature", {
         "name": "Temperature CH0 0x76",
         "unique_id": "bme280_ch0_0x76_temperature",
         "state_topic": TOPIC_BME_CH0_76_TEMP,
@@ -1736,6 +1705,17 @@ def clear_discovery():
         ("sensor", "pca9539_inputs"),
         ("binary_sensor", "status_fan1"),
         ("binary_sensor", "status_fan2"),
+        ("binary_sensor", "status_ena"),
+        ("binary_sensor", "status_dir"),
+        ("binary_sensor", "status_pu"),
+        ("binary_sensor", "status_relay1"),
+        ("binary_sensor", "status_relay2"),
+        ("binary_sensor", "status_relay3"),
+        ("binary_sensor", "status_relay4"),
+        ("binary_sensor", "status_relay5"),
+        ("binary_sensor", "status_relay6"),
+        ("binary_sensor", "status_taxo1"),
+        ("binary_sensor", "status_taxo2"),
     ]
     
     for component, unique_id in deprecated:
