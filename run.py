@@ -1959,6 +1959,7 @@ for attempt in range(1, 11):
 
 bme_start()
 pca9539_start()
+time.sleep(2)  # Allow pca9539_worker to complete first reading before LED indicator starts
 led_indicator_start()
 
 logger.info("Service running")
