@@ -453,6 +453,25 @@ def hardware_diagnostic():
         time.sleep(5)
 
     set_rgb_color(COLOR_OFF)
+
+    # CRITICAL: restore stepper signals to match the global state.
+    # The diagnostic toggled DIR/ENA True->False, leaving them LOW.  Without
+    # this restore, stepper_dir="CW" (global) is out of sync with the DIR pin
+    # (LOW), causing the next "CW" selection from HA to early-return and the
+    # next "CCW" selection to be a no-op (LOW->LOW), so the motor keeps
+    # rotating in the wrong direction.
+    if stepper_dir == "CW":
+        channel_on(CH_STEPPER_DIR)
+    else:
+        channel_off(CH_STEPPER_DIR)
+    if stepper_ena:
+        channel_on(CH_STEPPER_ENA)
+    else:
+        channel_off(CH_STEPPER_ENA)
+    channel_off(CH_PU)  # PU always idle after diagnostic
+    logger.info("Stepper signals restored: DIR=%s, ENA=%s, PU=idle",
+                stepper_dir, "ON" if stepper_ena else "OFF")
+
     # Always set system_status to OK after diagnostic so led_indicator uses any_problem_realtime
     with status_lock:
         system_status = "OK"
