@@ -681,12 +681,13 @@ def pca9539_worker():
     global any_problem_realtime
 
     last_inputs = None
-    
+
     # Pulse detection state
     taxo1_history = []
     taxo2_history = []
     pu_history = []
-    
+    prev_pu_enabled = False  # Track PU enable transitions to reset history
+
 
     while pca9539_running:
         if pca9539:
@@ -712,7 +713,7 @@ def pca9539_worker():
                     if not is_ok: any_problem = True
                     client.publish(relay_topics[i], "ON" if not is_ok else "OFF", retain=True)
 
-                # Stepper
+                # Stepper ENA feedback
                 ena_actual = (inputs >> 8) & 1
                 ena_ok = (stepper_ena == (ena_actual == 1))
                 if not ena_ok: any_problem = True
@@ -726,17 +727,30 @@ def pca9539_worker():
                     if not dir_ok: any_problem = True
                     client.publish(TOPIC_FEEDBACK_DIR, "ON" if not dir_ok else "OFF", retain=True)
                 else:
-                    # When stepper is disabled, DIR feedback is not meaningful
                     client.publish(TOPIC_FEEDBACK_DIR, "OFF", retain=True)
 
                 # PU feedback only meaningful when stepper is enabled
                 if stepper_ena:
                     pu_actual = (inputs >> 10) & 1
-                    if not pu_enabled:
+                    cur_pu_enabled = pu_enabled  # snapshot
+
+                    # Clear history on enable/disable transitions so that
+                    # stale samples from the previous state don't cause
+                    # false "stuck" alarms (e.g. after a DIR change which
+                    # temporarily disables PU).
+                    if cur_pu_enabled != prev_pu_enabled:
+                        pu_history = []
+                        prev_pu_enabled = cur_pu_enabled
+
+                    if not cur_pu_enabled:
+                        # PU disabled → expect line LOW (0)
                         pu_ok = (pu_actual == 0)
                     else:
+                        # PU enabled → expect toggling; stuck = problem.
+                        # Need ≥ 3 samples before we can judge.
                         pu_history.append(pu_actual)
-                        if len(pu_history) > 5: pu_history.pop(0)
+                        if len(pu_history) > 5:
+                            pu_history.pop(0)
                         if len(pu_history) >= 3 and all(x == pu_history[0] for x in pu_history):
                             pu_ok = False
                         else:
@@ -745,6 +759,8 @@ def pca9539_worker():
                     client.publish(TOPIC_FEEDBACK_PU, "ON" if not pu_ok else "OFF", retain=True)
                 else:
                     # When stepper is disabled, PU feedback is not meaningful
+                    pu_history = []
+                    prev_pu_enabled = False
                     client.publish(TOPIC_FEEDBACK_PU, "OFF", retain=True)
 
                 # TAXO 1
@@ -997,43 +1013,79 @@ def apply_switch(channel: int, state: bool):
 
 
 def stepper_apply_dir(value: str):
+    """Safely change stepper direction (DM332T-compatible).
+
+    Procedure:
+      1. Disable pulse generation (pu_enabled = False).
+      2. Wait for pu_worker to acknowledge and stop pulsing.
+      3. Force PUL line LOW explicitly (covers race where worker is mid-pulse).
+      4. DIR hold time — wait after last PUL edge before changing DIR
+         (DM332T: ≥ 5 µs; we use 50 ms for mechanical settling).
+      5. Update stepper_dir, set DIR pin, verify via PCA9539 feedback.
+      6. DIR setup time — wait after DIR change before next PUL edge
+         (DM332T: ≥ 5 µs; we use 50 ms so the driver has latched the level).
+      7. Re-enable pulse generation if it was previously enabled.
+
+    If verification fails, pulses are NOT resumed to avoid running the motor
+    in an unknown direction.  The early-return for same-direction is safe
+    because the init block guarantees the DIR pin matches stepper_dir at boot.
+    """
     global stepper_dir, pu_enabled, pu_is_pulsing
     new_dir = "CCW" if value == "CCW" else "CW"
-    
-    # If the direction is already the same, do nothing
+
     if new_dir == stepper_dir:
+        logger.info("Stepper DIR unchanged (%s); no action.", stepper_dir)
         return
 
-    logger.info("Stepper DIR change requested: %s -> %s. Performing safe switch...", stepper_dir, new_dir)
-    
-    # 1. Disable pulse generation and wait for current pulse to finish
-    was_enabled = False
+    logger.info("Stepper DIR change: %s -> %s. Performing safe switch...",
+                stepper_dir, new_dir)
+
+    # --- STEP 1: Disable pulse generation ---
     with pu_lock:
         was_enabled = pu_enabled
         pu_enabled = False
-    
-    # Wait for pu_worker to stop pulsing (timeout after 2 seconds)
+
+    # --- STEP 2: Wait for pu_worker to stop pulsing (timeout 2 s) ---
     start_wait = time.time()
     while pu_is_pulsing and (time.time() - start_wait < 2.0):
-        time.sleep(0.01)
-    
-    # Extra safety wait to ensure driver is ready
+        time.sleep(0.002)
+    if pu_is_pulsing:
+        logger.warning("pu_worker did not acknowledge disable within 2 s; "
+                       "continuing with DIR change anyway.")
+
+    # --- STEP 3: Force PUL LOW explicitly ---
+    # Covers the edge case where pu_worker was between channel_on and
+    # channel_off and has not yet looped back to see pu_enabled = False.
+    channel_off(CH_PU)
+
+    # --- STEP 4: DIR hold time after last PUL falling edge ---
+    # DM332T datasheet: ≥ 5 µs.  50 ms also lets the rotor decelerate
+    # so that the reversal does not cause step loss or current spike.
     time.sleep(0.05)
-    
-    # 2. Change DIR signal
+
+    # --- STEP 5: Update state and set DIR pin (with verification) ---
     stepper_dir = new_dir
-    verified_apply_switch(CH_STEPPER_DIR, stepper_dir == "CW", "Stepper DIR")
-    
-    # 3. Wait ≥ 50 ms (as required for DM332T setup time)
-    time.sleep(0.06)
-    
-    # 4. Resume pulse generation if it was enabled
+    ok = verified_apply_switch(CH_STEPPER_DIR, stepper_dir == "CW", "Stepper DIR")
+    if not ok:
+        logger.error("Stepper DIR verification FAILED (target=%s). "
+                     "Pulses NOT resumed — check PCA9539 pin 9 feedback.",
+                     stepper_dir)
+        # Do NOT resume pulses — the physical DIR state is unknown.
+        return
+
+    # --- STEP 6: DIR setup time before first new PUL rising edge ---
+    # DM332T datasheet: ≥ 5 µs.  50 ms guarantees the driver has latched
+    # the new DIR level well before we start pulsing again.
+    time.sleep(0.05)
+
+    # --- STEP 7: Resume pulse generation if it was enabled before ---
     if was_enabled:
         with pu_lock:
             pu_enabled = True
-        logger.info("Stepper DIR changed and pulses resumed.")
+        logger.info("Stepper DIR changed to %s; pulses resumed.", stepper_dir)
     else:
-        logger.info("Stepper DIR changed.")
+        logger.info("Stepper DIR changed to %s (pulses remain disabled).",
+                    stepper_dir)
 
 
 def stepper_apply_ena(state: bool):
@@ -1043,10 +1095,16 @@ def stepper_apply_ena(state: bool):
 
 
 def pu_worker():
-    global pu_running, pu_is_pulsing, system_status
+    """Generate step pulses for the DM332T stepper driver.
+
+    PUL feedback monitoring is handled by pca9539_worker (every 1 s),
+    NOT here — doing an I2C read on every pulse cycle would cause bus
+    contention and timing jitter at higher frequencies (e.g. 100 Hz → 5 ms
+    half-period, while a single I2C read takes ~1 ms).
+    """
+    global pu_running, pu_is_pulsing
     last_level = None
     last_enabled = None
-    pulse_feedback_count = 0
 
     while pu_running:
         with pu_lock:
@@ -1065,41 +1123,24 @@ def pu_worker():
 
         if last_enabled is not True:
             last_enabled = True
-        
+
         pu_is_pulsing = True
         half = 0.5 / freq
-        
-        # Pulse ON
+
+        # Pulse HIGH phase (DM332T steps on LOW→HIGH transition after opto)
         if last_level is not True:
             channel_on(CH_PU)
             last_level = True
-        
-        # Small sleep and check feedback
-        time.sleep(min(0.005, half * 0.5))
-        if get_pca9539_pin(10) == 1:
-            pulse_feedback_count += 1
-        
-        time.sleep(max(0, half - min(0.005, half * 0.5)))
-        
+        time.sleep(half)
+
         if not pu_running:
             break
-            
-        # Pulse OFF
+
+        # Pulse LOW phase
         if last_level is not False:
             channel_off(CH_PU)
             last_level = False
         time.sleep(half)
-
-        # Every 100 cycles, verify we are actually getting pulses if enabled
-        # This is a bit arbitrary, but prevents log spamming
-        # For very low frequencies, we might want to check more often
-        if freq > 1.0 and pulse_feedback_count == 0:
-            # We should have seen pulses
-            logger.warning("PU feedback not detected while pulsing!")
-            with status_lock:
-                system_status = "ERROR"
-        
-        pulse_feedback_count = 0
 
     pu_is_pulsing = False
     channel_off(CH_PU)
@@ -1235,7 +1276,15 @@ try:
     channel_off(CH_HEATER_4)
     channel_off(CH_FAN_1_POWER)
     channel_off(CH_FAN_2_POWER)
-    channel_off(CH_STEPPER_DIR)
+    # Initialize DIR pin to match default stepper_dir.
+    # Convention: "CW" → channel_on (HIGH), "CCW" → channel_off (LOW).
+    # Without this, stepper_dir="CW" but DIR pin=LOW → first CW selection
+    # from HA dropdown is silently skipped (early-return), causing a mismatch
+    # where the UI shows CW but the motor physically rotates CCW.
+    if stepper_dir == "CW":
+        channel_on(CH_STEPPER_DIR)
+    else:
+        channel_off(CH_STEPPER_DIR)
     channel_off(CH_STEPPER_ENA)
     channel_off(CH_PU)
     channel_off(CH_RESERVE1)
