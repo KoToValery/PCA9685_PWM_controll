@@ -738,12 +738,16 @@ def pca9539_worker():
                 if not ena_ok: any_problem = True
                 client.publish(TOPIC_FEEDBACK_ENA, "ON" if not ena_ok else "OFF", retain=True)
 
-                # DIR feedback only meaningful when stepper is enabled
+                # DIR feedback only meaningful when stepper is enabled.
+                # Note: DIR is applied open-loop (see FEEDBACK_MAP comment).
+                # We still publish the observed status for diagnostics, but
+                # we do NOT flag a mismatch as a system problem, because the
+                # feedback on pin 9 has been observed to be unreliable.
                 if stepper_ena:
                     dir_actual = (inputs >> 9) & 1
                     dir_expected_high = (stepper_dir == "CW")
                     dir_ok = (dir_expected_high == (dir_actual == 1))
-                    if not dir_ok: any_problem = True
+                    # Diagnostic only — do NOT set any_problem on DIR mismatch.
                     client.publish(TOPIC_FEEDBACK_DIR, "ON" if not dir_ok else "OFF", retain=True)
                 else:
                     client.publish(TOPIC_FEEDBACK_DIR, "OFF", retain=True)
@@ -967,6 +971,11 @@ def update_pwm2_output_locked():
 # Relays: 0-5 (IO0_0 to IO0_5)
 # Stepper: 8-10 (IO1_0 to IO1_2)
 # TAXO: 11-12 (IO1_3 to IO1_4)
+# NOTE: CH_STEPPER_DIR (feedback pin 9) is intentionally NOT in this map.
+# DIR feedback verification proved unreliable in practice and was blocking
+# direction changes on the real DM332T hardware.  The DIR command is now
+# applied unconditionally (open-loop), which matches the historical
+# behavior in which direction changes worked correctly.
 FEEDBACK_MAP = {
     CH_HEATER_1: 0,
     CH_HEATER_2: 1,
@@ -975,7 +984,6 @@ FEEDBACK_MAP = {
     CH_FAN_1_POWER: 4,
     CH_FAN_2_POWER: 5,
     CH_STEPPER_ENA: 8,
-    CH_STEPPER_DIR: 9,
     CH_PU: 10
 }
 
@@ -1045,9 +1053,9 @@ def stepper_apply_dir(value: str):
          (DM332T: ≥ 5 µs; we use 50 ms so the driver has latched the level).
       7. Re-enable pulse generation if it was previously enabled.
 
-    If verification fails, pulses are NOT resumed to avoid running the motor
-    in an unknown direction.  The early-return for same-direction is safe
-    because the init block guarantees the DIR pin matches stepper_dir at boot.
+    DIR is applied OPEN-LOOP (no PCA9539 feedback verification), because
+    the feedback on pin 9 was unreliable and blocked real direction changes.
+    Pulses always resume if they were previously enabled.
     """
     global stepper_dir, pu_enabled, pu_is_pulsing
     new_dir = "CCW" if value == "CCW" else "CW"
@@ -1082,15 +1090,13 @@ def stepper_apply_dir(value: str):
     # so that the reversal does not cause step loss or current spike.
     time.sleep(0.05)
 
-    # --- STEP 5: Update state and set DIR pin (with verification) ---
+    # --- STEP 5: Update state and set DIR pin (open-loop, no verification) ---
     stepper_dir = new_dir
-    ok = verified_apply_switch(CH_STEPPER_DIR, stepper_dir == "CW", "Stepper DIR")
-    if not ok:
-        logger.error("Stepper DIR verification FAILED (target=%s). "
-                     "Pulses NOT resumed — check PCA9539 pin 9 feedback.",
-                     stepper_dir)
-        # Do NOT resume pulses — the physical DIR state is unknown.
-        return
+    if stepper_dir == "CW":
+        channel_on(CH_STEPPER_DIR)
+    else:
+        channel_off(CH_STEPPER_DIR)
+    logger.info("Stepper DIR pin set to %s (open-loop).", stepper_dir)
 
     # --- STEP 6: DIR setup time before first new PUL rising edge ---
     # DM332T datasheet: ≥ 5 µs.  50 ms guarantees the driver has latched
