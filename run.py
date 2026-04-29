@@ -1133,15 +1133,15 @@ def sys_led_worker():
     while sys_led_running:
         level = not level
 
-        # System LED (CH15) always blinks (active-low: off=HIGH, on=LOW)
+        # System LED (CH15) always blinks (normal logic: 1=ON, 0=OFF)
         if level:
-            channel_off(CH_SYS_LED)
-        else:
             channel_on(CH_SYS_LED)
+        else:
+            channel_off(CH_SYS_LED)
 
         time.sleep(1.0)
 
-    channel_on(CH_SYS_LED)
+    channel_off(CH_SYS_LED)
 
 
 def sys_led_start():
@@ -1162,7 +1162,7 @@ def sys_led_stop():
     if sys_led_thread and sys_led_thread.is_alive():
         sys_led_thread.join(timeout=2)
     sys_led_thread = None
-    channel_on(CH_SYS_LED)
+    channel_off(CH_SYS_LED)
 
 
 def led_indicator_worker():
@@ -1242,7 +1242,7 @@ try:
     channel_on(CH_LED_RED)
     channel_on(CH_LED_BLUE)
     channel_on(CH_LED_GREEN)
-    channel_on(CH_SYS_LED)
+    channel_off(CH_SYS_LED)
 except Exception as e:
     logger.error("Fatal: cannot set initial channel states (%s)", e)
     sys.exit(1)
@@ -2002,7 +2002,7 @@ def safe_shutdown(signum=None, frame=None):
         channel_on(CH_LED_RED)
         channel_on(CH_LED_BLUE)
         channel_on(CH_LED_GREEN)
-        channel_on(CH_SYS_LED)
+        channel_off(CH_SYS_LED)
 
         client.publish(AVAIL_TOPIC, "offline", retain=True)
         client.loop_stop()
