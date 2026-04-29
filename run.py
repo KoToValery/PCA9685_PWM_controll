@@ -341,10 +341,11 @@ clean_lock = threading.Lock()
 CLEAN_PREFIXES = ["pca_", "bme280_", "status_", "pca9539_"]
 
 # Status and Colors
-COLOR_OFF = (0, 0, 0)
-COLOR_RED = (4095, 0, 0)
-COLOR_GREEN = (0, 4095, 0)
-COLOR_BLUE = (0, 0, 4095)
+# Active-low LEDs: 0 = LED ON, 4095 = LED OFF
+COLOR_OFF = (4095, 4095, 4095)
+COLOR_RED = (0, 4095, 4095)
+COLOR_GREEN = (4095, 0, 4095)
+COLOR_BLUE = (4095, 4095, 0)
 
 system_status = "DIAGNOSTIC"  # OK, ERROR, DIAGNOSTIC
 status_lock = threading.Lock()
@@ -1132,15 +1133,15 @@ def sys_led_worker():
     while sys_led_running:
         level = not level
 
-        # System LED (CH15) always blinks
+        # System LED (CH15) always blinks (active-low: off=HIGH, on=LOW)
         if level:
-            channel_on(CH_SYS_LED)
-        else:
             channel_off(CH_SYS_LED)
+        else:
+            channel_on(CH_SYS_LED)
 
         time.sleep(1.0)
 
-    channel_off(CH_SYS_LED)
+    channel_on(CH_SYS_LED)
 
 
 def sys_led_start():
@@ -1161,7 +1162,7 @@ def sys_led_stop():
     if sys_led_thread and sys_led_thread.is_alive():
         sys_led_thread.join(timeout=2)
     sys_led_thread = None
-    channel_off(CH_SYS_LED)
+    channel_on(CH_SYS_LED)
 
 
 def led_indicator_worker():
@@ -1238,10 +1239,10 @@ try:
     channel_off(CH_STEPPER_ENA)
     channel_off(CH_PU)
     channel_off(CH_RESERVE1)
-    channel_off(CH_LED_RED)
-    channel_off(CH_LED_BLUE)
-    channel_off(CH_LED_GREEN)
-    channel_off(CH_SYS_LED)
+    channel_on(CH_LED_RED)
+    channel_on(CH_LED_BLUE)
+    channel_on(CH_LED_GREEN)
+    channel_on(CH_SYS_LED)
 except Exception as e:
     logger.error("Fatal: cannot set initial channel states (%s)", e)
     sys.exit(1)
@@ -1998,10 +1999,10 @@ def safe_shutdown(signum=None, frame=None):
         channel_off(CH_STEPPER_ENA)
         channel_off(CH_PU)
         channel_off(CH_RESERVE1)
-        channel_off(CH_LED_RED)
-        channel_off(CH_LED_BLUE)
-        channel_off(CH_LED_GREEN)
-        channel_off(CH_SYS_LED)
+        channel_on(CH_LED_RED)
+        channel_on(CH_LED_BLUE)
+        channel_on(CH_LED_GREEN)
+        channel_on(CH_SYS_LED)
 
         client.publish(AVAIL_TOPIC, "offline", retain=True)
         client.loop_stop()
