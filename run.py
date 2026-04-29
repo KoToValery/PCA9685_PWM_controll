@@ -346,6 +346,42 @@ COLOR_OFF = (4095, 4095, 4095)
 COLOR_RED = (0, 4095, 4095)
 COLOR_GREEN = (4095, 0, 4095)
 COLOR_BLUE = (4095, 4095, 0)
+COLOR_YELLOW = (0, 0, 4095)      # red + green
+COLOR_CYAN = (4095, 0, 0)        # green + blue
+COLOR_MAGENTA = (0, 4095, 0)     # red + blue
+COLOR_WHITE = (0, 0, 0)          # red + green + blue
+
+# Palette mapping (config value -> RGB tuple). Used to resolve user-selected
+# colors for the semantic states (error / ok / diagnostic).
+_COLOR_PALETTE = {
+    "off": COLOR_OFF,
+    "red": COLOR_RED,
+    "green": COLOR_GREEN,
+    "blue": COLOR_BLUE,
+    "yellow": COLOR_YELLOW,
+    "cyan": COLOR_CYAN,
+    "magenta": COLOR_MAGENTA,
+    "white": COLOR_WHITE,
+}
+
+def _resolve_color(name, default_tuple, role):
+    """Resolve a color name from config to an RGB tuple, falling back safely."""
+    if not name:
+        return default_tuple
+    key = str(name).strip().lower()
+    if key in _COLOR_PALETTE:
+        return _COLOR_PALETTE[key]
+    logger.warning("Unknown color '%s' for %s, falling back to default.", name, role)
+    return default_tuple
+
+# Role-based colors (user-configurable via add-on options).
+COLOR_STATE_ERROR = _resolve_color(config.get("color_error", "red"), COLOR_RED, "color_error")
+COLOR_STATE_OK = _resolve_color(config.get("color_ok", "green"), COLOR_GREEN, "color_ok")
+COLOR_STATE_DIAGNOSTIC = _resolve_color(config.get("color_diagnostic", "blue"), COLOR_BLUE, "color_diagnostic")
+logger.info("RGB role mapping: error=%s, ok=%s, diagnostic=%s",
+            config.get("color_error", "red"),
+            config.get("color_ok", "green"),
+            config.get("color_diagnostic", "blue"))
 
 system_status = "DIAGNOSTIC"  # OK, ERROR, DIAGNOSTIC
 status_lock = threading.Lock()
@@ -375,8 +411,8 @@ def hardware_diagnostic():
     with status_lock:
         system_status = "DIAGNOSTIC"
     
-    # Ensure Blue LED is ON during diagnostic
-    set_rgb_color(COLOR_BLUE)
+    # Ensure diagnostic color is ON during diagnostic
+    set_rgb_color(COLOR_STATE_DIAGNOSTIC)
     
     problems = []
     
@@ -445,11 +481,11 @@ def hardware_diagnostic():
     
     if problems:
         logger.error("Hardware diagnostic completed with ERRORS: %s", ", ".join(problems))
-        set_rgb_color(COLOR_RED)
+        set_rgb_color(COLOR_STATE_ERROR)
         time.sleep(5)
     else:
         logger.info("Hardware diagnostic PASSED.")
-        set_rgb_color(COLOR_GREEN)
+        set_rgb_color(COLOR_STATE_OK)
         time.sleep(5)
 
     set_rgb_color(COLOR_OFF)
@@ -1234,20 +1270,20 @@ def led_indicator_worker():
         logger.info("[LED_INDICATOR] has_problem=%s, will show %s", has_problem, "RED" if has_problem else "GREEN")
 
         if has_problem:
-            # Blink red for LED_INDICATOR_ON_DURATION seconds
+            # Blink error color for LED_INDICATOR_ON_DURATION seconds
             start = time.time()
             while time.time() - start < LED_INDICATOR_ON_DURATION:
                 if not led_indicator_running:
                     break
-                set_rgb_color(COLOR_RED)
+                set_rgb_color(COLOR_STATE_ERROR)
                 time.sleep(0.5)
                 if not led_indicator_running:
                     break
                 set_rgb_color(COLOR_OFF)
                 time.sleep(0.5)
         else:
-            # Solid green for LED_INDICATOR_ON_DURATION seconds
-            set_rgb_color(COLOR_GREEN)
+            # Solid ok color for LED_INDICATOR_ON_DURATION seconds
+            set_rgb_color(COLOR_STATE_OK)
             start = time.time()
             while time.time() - start < LED_INDICATOR_ON_DURATION:
                 if not led_indicator_running:
