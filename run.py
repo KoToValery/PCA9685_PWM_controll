@@ -1804,6 +1804,24 @@ DISCOVERIES = [
 ]
 
 
+def is_hardware_available(unique_id: str) -> bool:
+    """Check if the hardware for a given unique_id is actually present/initialized."""
+    if "bme280_ch0_0x76" in unique_id:
+        return bme_ch0_76 is not None
+    if "bme280_ch0_0x77" in unique_id:
+        return bme_ch0_77 is not None
+    if "bme280_ch1" in unique_id:
+        return bme_ch1_77 is not None
+    
+    # Status sensors and other PCA9539 dependent entities
+    status_prefixes = ["status_", "pca9539_"]
+    if any(unique_id.startswith(p) for p in status_prefixes):
+        return pca9539 is not None
+        
+    # Main PCA9685 entities are considered mandatory as the service fails without it
+    return True
+
+
 def clear_discovery():
     """Clear old retained discovery messages by publishing empty payloads."""
     # List of unique_ids that were previously used but are now removed
@@ -1840,6 +1858,12 @@ def publish_discovery():
     clear_discovery()
     for item in DISCOVERIES:
         component, unique_id, payload = item[0], item[1], item[2]
+        
+        # If deep clean is enabled, only publish items whose hardware is present
+        if MQTT_DEEP_CLEAN and not is_hardware_available(unique_id):
+            logger.info("Skipping discovery for %s (hardware not initialized)", unique_id)
+            continue
+
         # 1. Publish discovery config
         config_topic = f"homeassistant/{component}/{unique_id}/config"
         client.publish(config_topic, json.dumps(payload), retain=True)
