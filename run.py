@@ -325,6 +325,8 @@ PCA9540_ADDR = int(config.get("pca9540_address", "0x70"), 16)
 BME_INTERVAL = int(config.get("bme_interval", 30))
 LED_INDICATOR_INTERVAL = int(config.get("led_indicator_interval", 30))
 LED_INDICATOR_ON_DURATION = 5  # seconds to show indicator
+STARTUP_DIAGNOSTIC_MIN_DURATION = 3.0
+STARTUP_RESULT_BLINK_DURATION = 5.0
 PCA_FREQ = int(config.get("pca_frequency", 1000))
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
@@ -385,6 +387,7 @@ logger.info("RGB role mapping: error=%s, ok=%s, diagnostic=%s",
 
 system_status = "DIAGNOSTIC"  # OK, ERROR, DIAGNOSTIC
 status_lock = threading.Lock()
+startup_init_errors = []
 
 # Real-time problem detection from pca9539_worker
 any_problem_realtime = False
@@ -395,6 +398,16 @@ def set_rgb_color(color_tuple):
     pca.set_duty_12bit(CH_LED_RED, color_tuple[0])
     pca.set_duty_12bit(CH_LED_GREEN, color_tuple[1])
     pca.set_duty_12bit(CH_LED_BLUE, color_tuple[2])
+
+
+def blink_rgb_color(color_tuple, duration=5.0, period=0.5):
+    start = time.time()
+    half_period = max(0.05, float(period) / 2.0)
+    while time.time() - start < duration:
+        set_rgb_color(color_tuple)
+        time.sleep(half_period)
+        set_rgb_color(COLOR_OFF)
+        time.sleep(half_period)
 
 def get_pca9539_pin(pin_idx):
     """Read a specific pin from PCA9539. pin_idx 0-15."""
@@ -557,14 +570,17 @@ TOPIC_PU_FREQ_STATE = _topic("number", "pca_pu_freq_hz", "state")
 TOPIC_BME_CH0_76_TEMP = _topic("sensor", "bme280_ch0_0x76_temperature", "state")
 TOPIC_BME_CH0_76_HUM = _topic("sensor", "bme280_ch0_0x76_humidity", "state")
 TOPIC_BME_CH0_76_PRESS = _topic("sensor", "bme280_ch0_0x76_pressure", "state")
+TOPIC_BME_CH0_76_STATUS = _topic("sensor", "bme280_ch0_0x76_status", "state")
 
 TOPIC_BME_CH0_77_TEMP = _topic("sensor", "bme280_ch0_0x77_temperature", "state")
 TOPIC_BME_CH0_77_HUM = _topic("sensor", "bme280_ch0_0x77_humidity", "state")
 TOPIC_BME_CH0_77_PRESS = _topic("sensor", "bme280_ch0_0x77_pressure", "state")
+TOPIC_BME_CH0_77_STATUS = _topic("sensor", "bme280_ch0_0x77_status", "state")
 
 TOPIC_BME_CH1_77_TEMP = _topic("sensor", "bme280_ch1_0x77_temperature", "state")
 TOPIC_BME_CH1_77_HUM = _topic("sensor", "bme280_ch1_0x77_humidity", "state")
 TOPIC_BME_CH1_77_PRESS = _topic("sensor", "bme280_ch1_0x77_pressure", "state")
+TOPIC_BME_CH1_77_STATUS = _topic("sensor", "bme280_ch1_0x77_status", "state")
 
 TOPIC_PCA9539_INPUTS = "homeassistant/sensor/pca9539_inputs/state"
 
@@ -648,6 +664,7 @@ try:
     logger.info("PCA9539 GPIO expander initialized")
 except Exception as e:
     logger.warning("PCA9539 initialization failed: %s. GPIO feedback will be disabled.", e)
+    startup_init_errors.append(f"PCA9539 initialization failed: {e}")
 
 
 logger.info("Opening I2C bus %s, PCA9540B addr=%s", I2C_BUS, hex(PCA9540_ADDR))
@@ -657,10 +674,12 @@ try:
     logger.info("PCA9540B multiplexer initialized")
 except Exception as e:
     logger.warning("PCA9540B initialization failed: %s. I2C multiplexing disabled.", e)
+    startup_init_errors.append(f"PCA9540B initialization failed: {e}")
 
 
 def init_bme(channel_code: int, address: int, label: str):
     if not pca9540:
+        startup_init_errors.append(f"BME280 initialization skipped on {label} at {hex(address)}: PCA9540B not available")
         return None
     try:
         # First select the channel on the mux
@@ -674,6 +693,7 @@ def init_bme(channel_code: int, address: int, label: str):
         return sensor
     except Exception as e:
         logger.warning("BME280 initialization failed on %s at %s: %s", label, hex(address), e)
+        startup_init_errors.append(f"BME280 initialization failed on {label} at {hex(address)}: {e}")
         # Ensure we deselect even on failure
         try: pca9540.deselect_channels()
         except: pass
@@ -891,56 +911,80 @@ def pca9539_stop():
     pca9539_thread = None
 
 
+def publish_empty_bme_values(temp_topic, press_topic, hum_topic):
+    client.publish(temp_topic, "", retain=True)
+    client.publish(press_topic, "", retain=True)
+    client.publish(hum_topic, "", retain=True)
+
+
+def publish_bme_sensor_state(sensor, label, temp_topic, press_topic, hum_topic, status_topic):
+    if not sensor:
+        publish_empty_bme_values(temp_topic, press_topic, hum_topic)
+        client.publish(status_topic, "no sensor connected", retain=True)
+        return
+
+    try:
+        temp, press, hum = sensor.read_data()
+    except Exception as e:
+        logger.error("BME280 %s read error: %s", label, e)
+        publish_empty_bme_values(temp_topic, press_topic, hum_topic)
+        client.publish(status_topic, "read error", retain=True)
+        return
+
+    if temp is None or press is None:
+        publish_empty_bme_values(temp_topic, press_topic, hum_topic)
+        client.publish(status_topic, "no value available", retain=True)
+        return
+
+    client.publish(temp_topic, f"{temp:.2f}", retain=True)
+    client.publish(press_topic, f"{press:.2f}", retain=True)
+    if sensor.is_bme and hum is not None:
+        client.publish(hum_topic, f"{hum:.2f}", retain=True)
+        client.publish(status_topic, "connected", retain=True)
+    else:
+        client.publish(hum_topic, "", retain=True)
+        client.publish(status_topic, "connected BMP280; humidity unavailable", retain=True)
+
+
+def publish_all_bme_statuses():
+    if not pca9540:
+        publish_bme_sensor_state(None, "CH0 0x76", TOPIC_BME_CH0_76_TEMP, TOPIC_BME_CH0_76_PRESS, TOPIC_BME_CH0_76_HUM, TOPIC_BME_CH0_76_STATUS)
+        publish_bme_sensor_state(None, "CH0 0x77", TOPIC_BME_CH0_77_TEMP, TOPIC_BME_CH0_77_PRESS, TOPIC_BME_CH0_77_HUM, TOPIC_BME_CH0_77_STATUS)
+        publish_bme_sensor_state(None, "CH1 0x77", TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_STATUS)
+        return
+
+    try:
+        pca9540.select_channel(PCA9540B.CH0)
+        time.sleep(0.01)
+        publish_bme_sensor_state(bme_ch0_76, "CH0 0x76", TOPIC_BME_CH0_76_TEMP, TOPIC_BME_CH0_76_PRESS, TOPIC_BME_CH0_76_HUM, TOPIC_BME_CH0_76_STATUS)
+        publish_bme_sensor_state(bme_ch0_77, "CH0 0x77", TOPIC_BME_CH0_77_TEMP, TOPIC_BME_CH0_77_PRESS, TOPIC_BME_CH0_77_HUM, TOPIC_BME_CH0_77_STATUS)
+    except Exception as e:
+        logger.error("BME280 CH0 mux/read error: %s", e)
+        publish_empty_bme_values(TOPIC_BME_CH0_76_TEMP, TOPIC_BME_CH0_76_PRESS, TOPIC_BME_CH0_76_HUM)
+        publish_empty_bme_values(TOPIC_BME_CH0_77_TEMP, TOPIC_BME_CH0_77_PRESS, TOPIC_BME_CH0_77_HUM)
+        client.publish(TOPIC_BME_CH0_76_STATUS, "read error", retain=True)
+        client.publish(TOPIC_BME_CH0_77_STATUS, "read error", retain=True)
+    finally:
+        try: pca9540.deselect_channels()
+        except: pass
+
+    try:
+        pca9540.select_channel(PCA9540B.CH1)
+        time.sleep(0.01)
+        publish_bme_sensor_state(bme_ch1_77, "CH1 0x77", TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_STATUS)
+    except Exception as e:
+        logger.error("BME280 CH1 mux/read error: %s", e)
+        publish_empty_bme_values(TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM)
+        client.publish(TOPIC_BME_CH1_77_STATUS, "read error", retain=True)
+    finally:
+        try: pca9540.deselect_channels()
+        except: pass
+
+
 def bme_worker():
     global bme_running
     while bme_running:
-        # Read CH0
-        if pca9540:
-            try:
-                pca9540.select_channel(PCA9540B.CH0)
-                time.sleep(0.01)
-                
-                # Sensor at 0x76
-                if bme_ch0_76:
-                    temp, press, hum = bme_ch0_76.read_data()
-                    if temp is not None:
-                        client.publish(TOPIC_BME_CH0_76_TEMP, f"{temp:.2f}", retain=True)
-                        client.publish(TOPIC_BME_CH0_76_PRESS, f"{press:.2f}", retain=True)
-                        if bme_ch0_76.is_bme:
-                            client.publish(TOPIC_BME_CH0_76_HUM, f"{hum:.2f}", retain=True)
-                
-                # Sensor at 0x77
-                if bme_ch0_77:
-                    temp, press, hum = bme_ch0_77.read_data()
-                    if temp is not None:
-                        client.publish(TOPIC_BME_CH0_77_TEMP, f"{temp:.2f}", retain=True)
-                        client.publish(TOPIC_BME_CH0_77_PRESS, f"{press:.2f}", retain=True)
-                        if bme_ch0_77.is_bme:
-                            client.publish(TOPIC_BME_CH0_77_HUM, f"{hum:.2f}", retain=True)
-                
-                pca9540.deselect_channels()
-            except Exception as e:
-                logger.error("BME280 CH0 read error: %s", e)
-                try: pca9540.deselect_channels()
-                except: pass
-
-        # Read CH1
-        if bme_ch1_77 and pca9540:
-            try:
-                pca9540.select_channel(PCA9540B.CH1)
-                time.sleep(0.01)
-                temp, press, hum = bme_ch1_77.read_data()
-                if temp is not None:
-                    client.publish(TOPIC_BME_CH1_77_TEMP, f"{temp:.2f}", retain=True)
-                    client.publish(TOPIC_BME_CH1_77_PRESS, f"{press:.2f}", retain=True)
-                    if bme_ch1_77.is_bme:
-                        client.publish(TOPIC_BME_CH1_77_HUM, f"{hum:.2f}", retain=True)
-                
-                pca9540.deselect_channels()
-            except Exception as e:
-                logger.error("BME280 CH1 read error: %s", e)
-                try: pca9540.deselect_channels()
-                except: pass
+        publish_all_bme_statuses()
 
         time.sleep(BME_INTERVAL)
 
@@ -1343,9 +1387,8 @@ try:
     channel_off(CH_STEPPER_ENA)
     channel_off(CH_PU)
     channel_off(CH_RESERVE1)
-    channel_on(CH_LED_RED)
-    channel_on(CH_LED_BLUE)
-    channel_on(CH_LED_GREEN)
+    set_rgb_color(COLOR_STATE_DIAGNOSTIC)
+    startup_indicator_started_at = time.time()
     channel_off(CH_SYS_LED)
 except Exception as e:
     logger.error("Fatal: cannot set initial channel states (%s)", e)
@@ -1703,6 +1746,12 @@ DISCOVERIES = [
         "device_class": "pressure",
         "device": device_info_bme_ch0_76,
     }),
+    ("sensor", "bme280_ch0_0x76_status", {
+        "name": "Status CH0 0x76",
+        "unique_id": "bme280_ch0_0x76_status",
+        "state_topic": TOPIC_BME_CH0_76_STATUS,
+        "device": device_info_bme_ch0_76,
+    }),
     # BME280 CH0 0x77
     ("sensor", "bme280_ch0_0x77_temperature", {
         "name": "Temperature CH0 0x77",
@@ -1728,8 +1777,14 @@ DISCOVERIES = [
         "device_class": "pressure",
         "device": device_info_bme_ch0_77,
     }),
-    # BME280 CH1 0x76
-    ("sensor", "bme280_ch1_0x76_temperature", {
+    ("sensor", "bme280_ch0_0x77_status", {
+        "name": "Status CH0 0x77",
+        "unique_id": "bme280_ch0_0x77_status",
+        "state_topic": TOPIC_BME_CH0_77_STATUS,
+        "device": device_info_bme_ch0_77,
+    }),
+    # BME280 CH1 0x77
+    ("sensor", "bme280_ch1_0x77_temperature", {
         "name": "Temperature CH1 0x77",
         "unique_id": "bme280_ch1_0x77_temperature",
         "state_topic": TOPIC_BME_CH1_77_TEMP,
@@ -1737,20 +1792,26 @@ DISCOVERIES = [
         "device_class": "temperature",
         "device": device_info_bme_ch1_77,
     }),
-    ("sensor", "bme280_ch1_0x76_humidity", {
-        "name": "Humidity CH1 0x76",
-        "unique_id": "bme280_ch1_0x76_humidity",
+    ("sensor", "bme280_ch1_0x77_humidity", {
+        "name": "Humidity CH1 0x77",
+        "unique_id": "bme280_ch1_0x77_humidity",
         "state_topic": TOPIC_BME_CH1_77_HUM,
         "unit_of_measurement": "%",
         "device_class": "humidity",
         "device": device_info_bme_ch1_77,
     }),
-    ("sensor", "bme280_ch1_0x76_pressure", {
-        "name": "Pressure CH1 0x76",
-        "unique_id": "bme280_ch1_0x76_pressure",
+    ("sensor", "bme280_ch1_0x77_pressure", {
+        "name": "Pressure CH1 0x77",
+        "unique_id": "bme280_ch1_0x77_pressure",
         "state_topic": TOPIC_BME_CH1_77_PRESS,
         "unit_of_measurement": "hPa",
         "device_class": "pressure",
+        "device": device_info_bme_ch1_77,
+    }),
+    ("sensor", "bme280_ch1_0x77_status", {
+        "name": "Status CH1 0x77",
+        "unique_id": "bme280_ch1_0x77_status",
+        "state_topic": TOPIC_BME_CH1_77_STATUS,
         "device": device_info_bme_ch1_77,
     }),
     # TAXO status (TAXO1 under FAN 1, TAXO2 under FAN 2)
@@ -1822,6 +1883,9 @@ def clear_discovery():
         ("binary_sensor", "status_relay6"),
         ("binary_sensor", "status_taxo1"),
         ("binary_sensor", "status_taxo2"),
+        ("sensor", "bme280_ch1_0x76_temperature"),
+        ("sensor", "bme280_ch1_0x76_humidity"),
+        ("sensor", "bme280_ch1_0x76_pressure"),
     ]
     
     for component, unique_id in deprecated:
@@ -2125,14 +2189,28 @@ signal.signal(signal.SIGTERM, safe_shutdown)
 signal.signal(signal.SIGINT, safe_shutdown)
 
 
-# Start signaling and diagnostic
-sys_led_start()
-if pca9539:
-    hardware_diagnostic()
-else:
-    logger.warning("PCA9539 not available, skipping hardware diagnostic.")
+def show_startup_result():
+    global system_status
+    elapsed = time.time() - startup_indicator_started_at
+    remaining = STARTUP_DIAGNOSTIC_MIN_DURATION - elapsed
+    if remaining > 0:
+        time.sleep(remaining)
+
+    if startup_init_errors:
+        logger.warning("Initialization completed with warnings/errors: %s", "; ".join(startup_init_errors))
+        blink_rgb_color(COLOR_STATE_ERROR, STARTUP_RESULT_BLINK_DURATION)
+    else:
+        logger.info("Initialization completed successfully.")
+        blink_rgb_color(COLOR_STATE_OK, STARTUP_RESULT_BLINK_DURATION)
+
+    set_rgb_color(COLOR_OFF)
     with status_lock:
         system_status = "OK"
+
+
+# Start signaling. Relays stay OFF at boot; startup relay diagnostics are skipped.
+sys_led_start()
+logger.info("Startup relay diagnostics skipped; relay outputs remain OFF.")
 
 logger.info("Connecting to MQTT %s:%s...", MQTT_HOST, MQTT_PORT)
 for attempt in range(1, 11):
@@ -2149,9 +2227,11 @@ for attempt in range(1, 11):
             safe_shutdown()
         time.sleep(1.5 ** (attempt - 1))
 
+publish_all_bme_statuses()
 bme_start()
 pca9539_start()
 time.sleep(2)  # Allow pca9539_worker to complete first reading before LED indicator starts
+show_startup_result()
 led_indicator_start()
 
 logger.info("Service running")
