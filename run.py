@@ -680,9 +680,10 @@ except Exception as e:
     startup_init_errors.append(f"PCA9540B initialization failed: {e}")
 
 
-def init_bme(channel_code: int, address: int, label: str):
+def init_bme(channel_code: int, address: int, label: str, record_startup_error: bool = True):
     if not pca9540:
-        startup_init_errors.append(f"BME280 initialization skipped on {label} at {hex(address)}: PCA9540B not available")
+        if record_startup_error:
+            startup_init_errors.append(f"BME280 initialization skipped on {label} at {hex(address)}: PCA9540B not available")
         return None
     try:
         # First select the channel on the mux
@@ -696,7 +697,8 @@ def init_bme(channel_code: int, address: int, label: str):
         return sensor
     except Exception as e:
         logger.warning("BME280 initialization failed on %s at %s: %s", label, hex(address), e)
-        startup_init_errors.append(f"BME280 initialization failed on {label} at {hex(address)}: {e}")
+        if record_startup_error:
+            startup_init_errors.append(f"BME280 initialization failed on {label} at {hex(address)}: {e}")
         # Ensure we deselect even on failure
         try: pca9540.deselect_channels()
         except: pass
@@ -925,11 +927,22 @@ def publish_bme_data_unavailable(temp_topic, press_topic, hum_topic, avail_topic
     client.publish(avail_topic, "offline", retain=True)
 
 
+def recover_bme_if_missing(sensor, channel_code, address, label, status_topic):
+    if sensor:
+        return sensor
+
+    recovered = init_bme(channel_code, address, label, record_startup_error=False)
+    if recovered:
+        client.publish(status_topic, "connected", retain=True)
+        logger.info("BME280 sensor recovered on %s at %s", label, hex(address))
+    return recovered
+
+
 def publish_bme_sensor_state(sensor, label, temp_topic, press_topic, hum_topic, status_topic, avail_topic):
     if not sensor:
         publish_bme_data_unavailable(temp_topic, press_topic, hum_topic, avail_topic)
         client.publish(status_topic, "no sensor connected", retain=True)
-        return
+        return False
 
     try:
         temp, press, hum = sensor.read_data()
@@ -937,12 +950,12 @@ def publish_bme_sensor_state(sensor, label, temp_topic, press_topic, hum_topic, 
         logger.error("BME280 %s read error: %s", label, e)
         publish_bme_data_unavailable(temp_topic, press_topic, hum_topic, avail_topic)
         client.publish(status_topic, "read error", retain=True)
-        return
+        return False
 
     if temp is None or press is None:
         publish_bme_data_unavailable(temp_topic, press_topic, hum_topic, avail_topic)
         client.publish(status_topic, "no value available", retain=True)
-        return
+        return False
 
     client.publish(avail_topic, "online", retain=True)
     client.publish(temp_topic, f"{temp:.2f}", retain=True)
@@ -953,22 +966,31 @@ def publish_bme_sensor_state(sensor, label, temp_topic, press_topic, hum_topic, 
     else:
         client.publish(hum_topic, "", retain=True)
         client.publish(status_topic, "connected BMP280; humidity unavailable", retain=True)
+    return True
 
 
 def publish_all_bme_statuses():
+    global bme_ch0_76, bme_ch0_77, bme_ch1_77
+
     if not pca9540:
         publish_bme_sensor_state(None, "CH0 0x76", TOPIC_BME_CH0_76_TEMP, TOPIC_BME_CH0_76_PRESS, TOPIC_BME_CH0_76_HUM, TOPIC_BME_CH0_76_STATUS, TOPIC_BME_CH0_76_AVAIL)
         publish_bme_sensor_state(None, "CH0 0x77", TOPIC_BME_CH0_77_TEMP, TOPIC_BME_CH0_77_PRESS, TOPIC_BME_CH0_77_HUM, TOPIC_BME_CH0_77_STATUS, TOPIC_BME_CH0_77_AVAIL)
         publish_bme_sensor_state(None, "CH1 0x77", TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_STATUS, TOPIC_BME_CH1_77_AVAIL)
         return
 
+    bme_ch0_76 = recover_bme_if_missing(bme_ch0_76, PCA9540B.CH0, 0x76, "CH0", TOPIC_BME_CH0_76_STATUS)
+    bme_ch0_77 = recover_bme_if_missing(bme_ch0_77, PCA9540B.CH0, 0x77, "CH0", TOPIC_BME_CH0_77_STATUS)
     try:
         pca9540.select_channel(PCA9540B.CH0)
         time.sleep(0.01)
-        publish_bme_sensor_state(bme_ch0_76, "CH0 0x76", TOPIC_BME_CH0_76_TEMP, TOPIC_BME_CH0_76_PRESS, TOPIC_BME_CH0_76_HUM, TOPIC_BME_CH0_76_STATUS, TOPIC_BME_CH0_76_AVAIL)
-        publish_bme_sensor_state(bme_ch0_77, "CH0 0x77", TOPIC_BME_CH0_77_TEMP, TOPIC_BME_CH0_77_PRESS, TOPIC_BME_CH0_77_HUM, TOPIC_BME_CH0_77_STATUS, TOPIC_BME_CH0_77_AVAIL)
+        if not publish_bme_sensor_state(bme_ch0_76, "CH0 0x76", TOPIC_BME_CH0_76_TEMP, TOPIC_BME_CH0_76_PRESS, TOPIC_BME_CH0_76_HUM, TOPIC_BME_CH0_76_STATUS, TOPIC_BME_CH0_76_AVAIL):
+            bme_ch0_76 = None
+        if not publish_bme_sensor_state(bme_ch0_77, "CH0 0x77", TOPIC_BME_CH0_77_TEMP, TOPIC_BME_CH0_77_PRESS, TOPIC_BME_CH0_77_HUM, TOPIC_BME_CH0_77_STATUS, TOPIC_BME_CH0_77_AVAIL):
+            bme_ch0_77 = None
     except Exception as e:
         logger.error("BME280 CH0 mux/read error: %s", e)
+        bme_ch0_76 = None
+        bme_ch0_77 = None
         publish_bme_data_unavailable(TOPIC_BME_CH0_76_TEMP, TOPIC_BME_CH0_76_PRESS, TOPIC_BME_CH0_76_HUM, TOPIC_BME_CH0_76_AVAIL)
         publish_bme_data_unavailable(TOPIC_BME_CH0_77_TEMP, TOPIC_BME_CH0_77_PRESS, TOPIC_BME_CH0_77_HUM, TOPIC_BME_CH0_77_AVAIL)
         client.publish(TOPIC_BME_CH0_76_STATUS, "read error", retain=True)
@@ -977,12 +999,15 @@ def publish_all_bme_statuses():
         try: pca9540.deselect_channels()
         except: pass
 
+    bme_ch1_77 = recover_bme_if_missing(bme_ch1_77, PCA9540B.CH1, 0x77, "CH1", TOPIC_BME_CH1_77_STATUS)
     try:
         pca9540.select_channel(PCA9540B.CH1)
         time.sleep(0.01)
-        publish_bme_sensor_state(bme_ch1_77, "CH1 0x77", TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_STATUS, TOPIC_BME_CH1_77_AVAIL)
+        if not publish_bme_sensor_state(bme_ch1_77, "CH1 0x77", TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_STATUS, TOPIC_BME_CH1_77_AVAIL):
+            bme_ch1_77 = None
     except Exception as e:
         logger.error("BME280 CH1 mux/read error: %s", e)
+        bme_ch1_77 = None
         publish_bme_data_unavailable(TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_AVAIL)
         client.publish(TOPIC_BME_CH1_77_STATUS, "read error", retain=True)
     finally:
@@ -1000,7 +1025,7 @@ def bme_worker():
 
 def bme_start():
     global bme_thread, bme_running
-    if not (bme_ch0_76 or bme_ch0_77 or bme_ch1_77):
+    if not pca9540:
         return
     with bme_lock:
         if bme_thread and bme_thread.is_alive():
