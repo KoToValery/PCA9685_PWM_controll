@@ -1750,6 +1750,7 @@ DISCOVERIES = [
         "name": "Status CH0 0x76",
         "unique_id": "bme280_ch0_0x76_status",
         "state_topic": TOPIC_BME_CH0_76_STATUS,
+        "entity_category": "diagnostic",
         "device": device_info_bme_ch0_76,
     }),
     # BME280 CH0 0x77
@@ -1781,6 +1782,7 @@ DISCOVERIES = [
         "name": "Status CH0 0x77",
         "unique_id": "bme280_ch0_0x77_status",
         "state_topic": TOPIC_BME_CH0_77_STATUS,
+        "entity_category": "diagnostic",
         "device": device_info_bme_ch0_77,
     }),
     # BME280 CH1 0x77
@@ -1812,6 +1814,7 @@ DISCOVERIES = [
         "name": "Status CH1 0x77",
         "unique_id": "bme280_ch1_0x77_status",
         "state_topic": TOPIC_BME_CH1_77_STATUS,
+        "entity_category": "diagnostic",
         "device": device_info_bme_ch1_77,
     }),
     # TAXO status (TAXO1 under FAN 1, TAXO2 under FAN 2)
