@@ -323,8 +323,6 @@ PCA_ADDR = int(config["pca_address"], 16)
 PCA9539_ADDR = int(config.get("pca9539_address", "0x74"), 16)
 PCA9540_ADDR = int(config.get("pca9540_address", "0x70"), 16)
 BME_INTERVAL = int(config.get("bme_interval", 30))
-LED_INDICATOR_INTERVAL = int(config.get("led_indicator_interval", 30))
-LED_INDICATOR_ON_DURATION = 5  # seconds to show indicator
 STARTUP_DIAGNOSTIC_MIN_DURATION = 3.0
 STARTUP_RESULT_BLINK_DURATION = 5.0
 PCA_FREQ = int(config.get("pca_frequency", 1000))
@@ -398,6 +396,80 @@ def set_rgb_color(color_tuple):
     pca.set_duty_12bit(CH_LED_RED, color_tuple[0])
     pca.set_duty_12bit(CH_LED_GREEN, color_tuple[1])
     pca.set_duty_12bit(CH_LED_BLUE, color_tuple[2])
+
+
+def _clamp_u8(value, default=0):
+    try:
+        return max(0, min(255, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _rgb_u8_to_active_low_duty(component, brightness):
+    level = (_clamp_u8(component) * _clamp_u8(brightness, 255)) / 255.0
+    return 4095 - round((level / 255.0) * 4095)
+
+
+def apply_rgb_led_state_locked():
+    if rgb_led_state["state"] != "ON":
+        set_rgb_color(COLOR_OFF)
+        return
+
+    color = rgb_led_state["color"]
+    brightness = rgb_led_state["brightness"]
+    set_rgb_color((
+        _rgb_u8_to_active_low_duty(color.get("r", 0), brightness),
+        _rgb_u8_to_active_low_duty(color.get("g", 0), brightness),
+        _rgb_u8_to_active_low_duty(color.get("b", 0), brightness),
+    ))
+
+
+def handle_rgb_led_command(payload):
+    global rgb_led_ha_control_enabled
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        logger.warning("Invalid RGB LED command payload: %s", payload)
+        return
+
+    if not isinstance(data, dict):
+        logger.warning("Invalid RGB LED command type: %s", type(data).__name__)
+        return
+
+    with rgb_led_lock:
+        state = data.get("state")
+        if isinstance(state, str):
+            state = state.upper()
+            if state in ("ON", "OFF"):
+                rgb_led_state["state"] = state
+
+        if "brightness" in data:
+            rgb_led_state["brightness"] = _clamp_u8(data.get("brightness"), 255)
+
+        color = data.get("color")
+        if isinstance(color, dict):
+            current = rgb_led_state["color"]
+            current["r"] = _clamp_u8(color.get("r", current["r"]), current["r"])
+            current["g"] = _clamp_u8(color.get("g", current["g"]), current["g"])
+            current["b"] = _clamp_u8(color.get("b", current["b"]), current["b"])
+            rgb_led_state["color_mode"] = "rgb"
+
+        if rgb_led_ha_control_enabled:
+            apply_rgb_led_state_locked()
+        else:
+            logger.info("Queued RGB LED command until startup indication completes")
+        payload_out = json.dumps(rgb_led_state)
+
+    client.publish(TOPIC_RGB_LED_STATE, payload_out, retain=True)
+
+
+def enable_rgb_led_ha_control():
+    global rgb_led_ha_control_enabled
+    with rgb_led_lock:
+        rgb_led_ha_control_enabled = True
+        apply_rgb_led_state_locked()
+        payload = json.dumps(rgb_led_state)
+    client.publish(TOPIC_RGB_LED_STATE, payload, retain=True)
 
 
 def blink_rgb_color(color_tuple, duration=5.0, period=0.5):
@@ -521,7 +593,7 @@ def hardware_diagnostic():
     logger.info("Stepper signals restored: DIR=%s, ENA=%s, PU=idle",
                 stepper_dir, "ON" if stepper_ena else "OFF")
 
-    # Always set system_status to OK after diagnostic so led_indicator uses any_problem_realtime
+    # Runtime problem reporting is exposed through MQTT feedback sensors.
     with status_lock:
         system_status = "OK"
     return len(problems) == 0
@@ -566,6 +638,9 @@ TOPIC_PU_ENABLE_STATE = _topic("switch", "pca_pu_enable", "state")
 
 TOPIC_PU_FREQ_CMD = _topic("number", "pca_pu_freq_hz", "set")
 TOPIC_PU_FREQ_STATE = _topic("number", "pca_pu_freq_hz", "state")
+
+TOPIC_RGB_LED_CMD = _topic("light", "pca_rgb_led", "set")
+TOPIC_RGB_LED_STATE = _topic("light", "pca_rgb_led", "state")
 
 TOPIC_BME_CH0_76_TEMP = _topic("sensor", "bme280_ch0_0x76_temperature", "state")
 TOPIC_BME_CH0_76_HUM = _topic("sensor", "bme280_ch0_0x76_humidity", "state")
@@ -737,9 +812,14 @@ sys_led_thread = None
 sys_led_running = False
 sys_led_lock = threading.Lock()
 
-led_indicator_thread = None
-led_indicator_running = False
-led_indicator_lock = threading.Lock()
+rgb_led_state = {
+    "state": "OFF",
+    "brightness": 255,
+    "color": {"r": 255, "g": 255, "b": 255},
+    "color_mode": "rgb",
+}
+rgb_led_ha_control_enabled = False
+rgb_led_lock = threading.Lock()
 
 bme_thread = None
 bme_running = False
@@ -1339,67 +1419,6 @@ def sys_led_stop():
     channel_off(CH_SYS_LED)
 
 
-def led_indicator_worker():
-    global led_indicator_running
-    while led_indicator_running:
-        with any_problem_lock:
-            has_problem = any_problem_realtime
-        
-        logger.info("[LED_INDICATOR] has_problem=%s, will show %s", has_problem, "RED" if has_problem else "GREEN")
-
-        if has_problem:
-            # Blink error color for LED_INDICATOR_ON_DURATION seconds
-            start = time.time()
-            while time.time() - start < LED_INDICATOR_ON_DURATION:
-                if not led_indicator_running:
-                    break
-                set_rgb_color(COLOR_STATE_ERROR)
-                time.sleep(0.5)
-                if not led_indicator_running:
-                    break
-                set_rgb_color(COLOR_OFF)
-                time.sleep(0.5)
-        else:
-            # Solid ok color for LED_INDICATOR_ON_DURATION seconds
-            set_rgb_color(COLOR_STATE_OK)
-            start = time.time()
-            while time.time() - start < LED_INDICATOR_ON_DURATION:
-                if not led_indicator_running:
-                    break
-                time.sleep(0.5)
-
-        # Turn off LED for the rest of the interval
-        set_rgb_color(COLOR_OFF)
-        sleep_until = time.time() + (LED_INDICATOR_INTERVAL - LED_INDICATOR_ON_DURATION)
-        while time.time() < sleep_until:
-            if not led_indicator_running:
-                break
-            time.sleep(0.5)
-
-    set_rgb_color(COLOR_OFF)
-
-
-def led_indicator_start():
-    global led_indicator_thread, led_indicator_running
-    with led_indicator_lock:
-        if led_indicator_thread and led_indicator_thread.is_alive():
-            return
-        led_indicator_running = True
-        led_indicator_thread = threading.Thread(target=led_indicator_worker, daemon=True)
-        led_indicator_thread.start()
-    logger.info("LED indicator started (interval=%ds, on_duration=%ds)", LED_INDICATOR_INTERVAL, LED_INDICATOR_ON_DURATION)
-
-
-def led_indicator_stop():
-    global led_indicator_thread, led_indicator_running
-    with led_indicator_lock:
-        led_indicator_running = False
-    if led_indicator_thread and led_indicator_thread.is_alive():
-        led_indicator_thread.join(timeout=2)
-    led_indicator_thread = None
-    set_rgb_color(COLOR_OFF)
-
-
 try:
     pca.set_duty_12bit(CH_PWM1, 4095)
     pca.set_duty_12bit(CH_PWM2, 4095)
@@ -1755,6 +1774,17 @@ DISCOVERIES = [
         },
         "via_device": device_info_stepper["identifiers"][0],
     }, None),  # Will handle pu_freq_hz dynamically
+    ("light", "pca_rgb_led", {
+        "name": "RGB LED",
+        "unique_id": "pca_rgb_led",
+        "schema": "json",
+        "command_topic": TOPIC_RGB_LED_CMD,
+        "state_topic": TOPIC_RGB_LED_STATE,
+        "availability_topic": AVAIL_TOPIC,
+        "brightness": True,
+        "supported_color_modes": ["rgb"],
+        "device": device_info_leds,
+    }, None),  # Will handle RGB LED state dynamically
     # BME280 CH0 0x76
     ("sensor", "bme280_ch0_0x76_temperature", {
         "name": "Temperature CH0 0x76",
@@ -1962,6 +1992,9 @@ def publish_discovery():
                     initial_val = stepper_dir
                 elif unique_id == "pca_pu_freq_hz":
                     initial_val = str(int(pu_freq_hz))
+                elif unique_id == "pca_rgb_led":
+                    with rgb_led_lock:
+                        initial_val = json.dumps(rgb_led_state)
 
             if state_topic and initial_val is not None:
                 client.publish(state_topic, initial_val, retain=True)
@@ -2024,6 +2057,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     client.subscribe(TOPIC_STEPPER_ENA_CMD)
     client.subscribe(TOPIC_PU_ENABLE_CMD)
     client.subscribe(TOPIC_PU_FREQ_CMD)
+    client.subscribe(TOPIC_RGB_LED_CMD)
 
     if MQTT_DEEP_CLEAN:
         logger.info("Deep clean enabled. Scanning for ghost topics...")
@@ -2176,6 +2210,9 @@ def on_message(client, userdata, msg):
                 pu_freq_hz = hz
             client.publish(TOPIC_PU_FREQ_STATE, str(int(hz)), retain=True)
 
+        elif topic == TOPIC_RGB_LED_CMD:
+            handle_rgb_led_command(payload)
+
     except Exception:
         logger.exception("Error processing topic=%s payload=%s", topic, payload)
 
@@ -2189,7 +2226,6 @@ def safe_shutdown(signum=None, frame=None):
         bme_stop()
         pca9539_stop()
         sys_led_stop()
-        led_indicator_stop()
         pu_stop()
 
         with pwm1_lock:
@@ -2273,9 +2309,9 @@ for attempt in range(1, 11):
 publish_all_bme_statuses()
 bme_start()
 pca9539_start()
-time.sleep(2)  # Allow pca9539_worker to complete first reading before LED indicator starts
+time.sleep(2)  # Allow pca9539_worker to complete the first feedback reading.
 show_startup_result()
-led_indicator_start()
+enable_rgb_led_ha_control()
 
 logger.info("Service running")
 logger.setLevel(logging.ERROR)
