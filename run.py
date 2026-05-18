@@ -4,6 +4,7 @@ PCA9685 PWM Controller for Home Assistant
 """
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -66,6 +67,8 @@ class PCA9685:
             self._write8(MODE1, MODE1_AI)
             self._write8(MODE2, MODE2_OUTDRV)
         time.sleep(0.01)
+        for channel in (CH_LED_RED, CH_LED_GREEN, CH_LED_BLUE):
+            self.set_duty_12bit(channel, 4095)
 
     def close(self):
         pass
@@ -351,6 +354,14 @@ COLOR_CYAN = (4095, 0, 0)        # green + blue
 COLOR_MAGENTA = (0, 4095, 0)     # red + blue
 COLOR_WHITE = (0, 0, 0)          # red + green + blue
 
+HA_PRESET_COLORS = {
+    "blue": {"r": 0, "g": 0, "b": 255},
+    "green": {"r": 0, "g": 255, "b": 0},
+    "red": {"r": 255, "g": 0, "b": 0},
+    "purple": {"r": 255, "g": 0, "b": 255},
+    "yellow": {"r": 255, "g": 255, "b": 0},
+}
+
 # Palette mapping (config value -> RGB tuple). Used to resolve user-selected
 # colors for the semantic states (error / ok / diagnostic).
 _COLOR_PALETTE = {
@@ -361,6 +372,7 @@ _COLOR_PALETTE = {
     "yellow": COLOR_YELLOW,
     "cyan": COLOR_CYAN,
     "magenta": COLOR_MAGENTA,
+    "purple": COLOR_MAGENTA,
     "white": COLOR_WHITE,
 }
 
@@ -403,6 +415,47 @@ def _clamp_u8(value, default=0):
         return max(0, min(255, int(value)))
     except (TypeError, ValueError):
         return default
+
+
+def _set_rgb_state_color(color):
+    rgb_led_state["color"]["r"] = _clamp_u8(color.get("r", 0))
+    rgb_led_state["color"]["g"] = _clamp_u8(color.get("g", 0))
+    rgb_led_state["color"]["b"] = _clamp_u8(color.get("b", 0))
+    rgb_led_state["color_mode"] = "rgb"
+
+
+def _xy_to_rgb_u8(x, y, brightness):
+    try:
+        x = float(x)
+        y = float(y)
+    except (TypeError, ValueError):
+        return None
+    if y <= 0.0:
+        return None
+
+    y_luma = _clamp_u8(brightness, 255) / 255.0
+    x_tristimulus = (y_luma / y) * x
+    z_tristimulus = (y_luma / y) * (1.0 - x - y)
+
+    r = x_tristimulus * 1.656492 - y_luma * 0.354851 - z_tristimulus * 0.255038
+    g = -x_tristimulus * 0.707196 + y_luma * 1.655397 + z_tristimulus * 0.036152
+    b = x_tristimulus * 0.051713 - y_luma * 0.121364 + z_tristimulus * 1.011530
+
+    r = 12.92 * r if r <= 0.0031308 else (1.0 + 0.055) * math.pow(r, 1.0 / 2.4) - 0.055
+    g = 12.92 * g if g <= 0.0031308 else (1.0 + 0.055) * math.pow(g, 1.0 / 2.4) - 0.055
+    b = 12.92 * b if b <= 0.0031308 else (1.0 + 0.055) * math.pow(b, 1.0 / 2.4) - 0.055
+
+    max_component = max(r, g, b)
+    if max_component > 1.0:
+        r /= max_component
+        g /= max_component
+        b /= max_component
+
+    return {
+        "r": _clamp_u8(round(max(0.0, min(1.0, r)) * 255)),
+        "g": _clamp_u8(round(max(0.0, min(1.0, g)) * 255)),
+        "b": _clamp_u8(round(max(0.0, min(1.0, b)) * 255)),
+    }
 
 
 def _rgb_u8_to_active_low_duty(component, brightness):
@@ -448,11 +501,30 @@ def handle_rgb_led_command(payload):
 
         color = data.get("color")
         if isinstance(color, dict):
-            current = rgb_led_state["color"]
-            current["r"] = _clamp_u8(color.get("r", current["r"]), current["r"])
-            current["g"] = _clamp_u8(color.get("g", current["g"]), current["g"])
-            current["b"] = _clamp_u8(color.get("b", current["b"]), current["b"])
-            rgb_led_state["color_mode"] = "rgb"
+            if all(component in color for component in ("r", "g", "b")):
+                _set_rgb_state_color(color)
+                rgb_led_state.pop("effect", None)
+            elif "x" in color and "y" in color:
+                rgb = _xy_to_rgb_u8(color.get("x"), color.get("y"), rgb_led_state["brightness"])
+                if rgb:
+                    _set_rgb_state_color(rgb)
+                    rgb_led_state.pop("effect", None)
+        elif isinstance(color, str):
+            color_key = color.strip().lower()
+            if color_key in HA_PRESET_COLORS:
+                _set_rgb_state_color(HA_PRESET_COLORS[color_key])
+                rgb_led_state["effect"] = color_key
+                rgb_led_state["state"] = "ON"
+
+        effect = data.get("effect")
+        if isinstance(effect, str):
+            effect_key = effect.strip().lower()
+            if effect_key in HA_PRESET_COLORS:
+                _set_rgb_state_color(HA_PRESET_COLORS[effect_key])
+                rgb_led_state["effect"] = effect_key
+                rgb_led_state["state"] = "ON"
+            else:
+                logger.warning("Unknown RGB LED preset/effect '%s'", effect)
 
         if rgb_led_ha_control_enabled:
             apply_rgb_led_state_locked()
@@ -724,6 +796,7 @@ for attempt in range(1, 11):
     try:
         pca = PCA9685(shared_bus, PCA_ADDR)
         pca.set_pwm_freq(PCA_FREQ)
+        set_rgb_color(COLOR_OFF)
         logger.info("PCA9685 global PWM frequency set to %s Hz", PCA_FREQ)
         break
     except Exception as e:
@@ -815,7 +888,7 @@ sys_led_lock = threading.Lock()
 rgb_led_state = {
     "state": "OFF",
     "brightness": 255,
-    "color": {"r": 255, "g": 255, "b": 255},
+    "color": HA_PRESET_COLORS["blue"].copy(),
     "color_mode": "rgb",
 }
 rgb_led_ha_control_enabled = False
@@ -1440,7 +1513,6 @@ try:
     channel_off(CH_STEPPER_ENA)
     channel_off(CH_PU)
     channel_off(CH_RESERVE1)
-    set_rgb_color(COLOR_STATE_DIAGNOSTIC)
     startup_indicator_started_at = time.time()
     channel_off(CH_SYS_LED)
 except Exception as e:
@@ -1783,6 +1855,8 @@ DISCOVERIES = [
         "availability_topic": AVAIL_TOPIC,
         "brightness": True,
         "supported_color_modes": ["rgb"],
+        "effect": True,
+        "effect_list": list(HA_PRESET_COLORS.keys()),
         "device": device_info_leds,
     }, None),  # Will handle RGB LED state dynamically
     # BME280 CH0 0x76
@@ -2289,6 +2363,8 @@ def show_startup_result():
 
 # Start signaling. Relays stay OFF at boot; startup relay diagnostics are skipped.
 sys_led_start()
+set_rgb_color(COLOR_STATE_DIAGNOSTIC)
+startup_indicator_started_at = time.time()
 logger.info("Startup relay diagnostics skipped; relay outputs remain OFF.")
 
 logger.info("Connecting to MQTT %s:%s...", MQTT_HOST, MQTT_PORT)

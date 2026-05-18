@@ -55,6 +55,6 @@ schema:
   pca_frequency: int(24,1526)
   default_duty_cycle: int(0,100)
   pu_default_hz: float?
-  color_error: list(red|green|blue|yellow|cyan|magenta|white|off)?
-  color_ok: list(red|green|blue|yellow|cyan|magenta|white|off)?
-  color_diagnostic: list(red|green|blue|yellow|cyan|magenta|white|off)?
+  color_error: list(red|green|blue|yellow|cyan|magenta|purple|white|off)?
+  color_ok: list(red|green|blue|yellow|cyan|magenta|purple|white|off)?
+  color_diagnostic: list(red|green|blue|yellow|cyan|magenta|purple|white|off)?
