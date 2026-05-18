@@ -207,3 +207,5 @@ marimo/_lsp/
 __marimo__/
 HAOS_Third_Party_Addon_Developer_Guide_Final.md
 .vscode/settings.json
+PCA9685_PWM_controll.zip
+HAOS_Third_Party_Addon_Developer_Guide_Core.md

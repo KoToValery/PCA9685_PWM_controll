@@ -354,10 +354,12 @@ COLOR_CYAN = (4095, 0, 0)        # green + blue
 COLOR_MAGENTA = (0, 4095, 0)     # red + blue
 COLOR_WHITE = (0, 0, 0)          # red + green + blue
 
+# Preset colors exposed to Home Assistant. The first three are the pure RGB
+# channels; mixed colors are kept only as quick tests for channel blending.
 HA_PRESET_COLORS = {
-    "blue": {"r": 0, "g": 0, "b": 255},
-    "green": {"r": 0, "g": 255, "b": 0},
     "red": {"r": 255, "g": 0, "b": 0},
+    "green": {"r": 0, "g": 255, "b": 0},
+    "blue": {"r": 0, "g": 0, "b": 255},
     "purple": {"r": 255, "g": 0, "b": 255},
     "yellow": {"r": 255, "g": 255, "b": 0},
 }
