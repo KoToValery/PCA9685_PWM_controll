@@ -205,3 +205,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+HAOS_Third_Party_Addon_Developer_Guide_Final.md
+.vscode/settings.json

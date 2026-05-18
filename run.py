@@ -726,11 +726,11 @@ TOPIC_BME_CH0_77_PRESS = _topic("sensor", "bme280_ch0_0x77_pressure", "state")
 TOPIC_BME_CH0_77_STATUS = _topic("sensor", "bme280_ch0_0x77_status", "state")
 TOPIC_BME_CH0_77_AVAIL = _topic("sensor", "bme280_ch0_0x77_data", "availability")
 
-TOPIC_BME_CH1_77_TEMP = _topic("sensor", "bme280_ch1_0x77_temperature", "state")
-TOPIC_BME_CH1_77_HUM = _topic("sensor", "bme280_ch1_0x77_humidity", "state")
-TOPIC_BME_CH1_77_PRESS = _topic("sensor", "bme280_ch1_0x77_pressure", "state")
-TOPIC_BME_CH1_77_STATUS = _topic("sensor", "bme280_ch1_0x77_status", "state")
-TOPIC_BME_CH1_77_AVAIL = _topic("sensor", "bme280_ch1_0x77_data", "availability")
+TOPIC_BME_CH1_76_TEMP = _topic("sensor", "bme280_ch1_0x76_temperature", "state")
+TOPIC_BME_CH1_76_HUM = _topic("sensor", "bme280_ch1_0x76_humidity", "state")
+TOPIC_BME_CH1_76_PRESS = _topic("sensor", "bme280_ch1_0x76_pressure", "state")
+TOPIC_BME_CH1_76_STATUS = _topic("sensor", "bme280_ch1_0x76_status", "state")
+TOPIC_BME_CH1_76_AVAIL = _topic("sensor", "bme280_ch1_0x76_data", "availability")
 
 TOPIC_PCA9539_INPUTS = "homeassistant/sensor/pca9539_inputs/state"
 
@@ -855,7 +855,7 @@ def init_bme(channel_code: int, address: int, label: str, record_startup_error: 
 
 bme_ch0_76 = init_bme(PCA9540B.CH0, 0x76, "CH0")
 bme_ch0_77 = init_bme(PCA9540B.CH0, 0x77, "CH0")
-bme_ch1_77 = init_bme(PCA9540B.CH1, 0x77, "CH1")
+bme_ch1_76 = init_bme(PCA9540B.CH1, 0x76, "CH1")
 
 
 pwm1_value = 0.0
@@ -1123,12 +1123,12 @@ def publish_bme_sensor_state(sensor, label, temp_topic, press_topic, hum_topic, 
 
 
 def publish_all_bme_statuses():
-    global bme_ch0_76, bme_ch0_77, bme_ch1_77
+    global bme_ch0_76, bme_ch0_77, bme_ch1_76
 
     if not pca9540:
         publish_bme_sensor_state(None, "CH0 0x76", TOPIC_BME_CH0_76_TEMP, TOPIC_BME_CH0_76_PRESS, TOPIC_BME_CH0_76_HUM, TOPIC_BME_CH0_76_STATUS, TOPIC_BME_CH0_76_AVAIL)
         publish_bme_sensor_state(None, "CH0 0x77", TOPIC_BME_CH0_77_TEMP, TOPIC_BME_CH0_77_PRESS, TOPIC_BME_CH0_77_HUM, TOPIC_BME_CH0_77_STATUS, TOPIC_BME_CH0_77_AVAIL)
-        publish_bme_sensor_state(None, "CH1 0x77", TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_STATUS, TOPIC_BME_CH1_77_AVAIL)
+        publish_bme_sensor_state(None, "CH1 0x76", TOPIC_BME_CH1_76_TEMP, TOPIC_BME_CH1_76_PRESS, TOPIC_BME_CH1_76_HUM, TOPIC_BME_CH1_76_STATUS, TOPIC_BME_CH1_76_AVAIL)
         return
 
     bme_ch0_76 = recover_bme_if_missing(bme_ch0_76, PCA9540B.CH0, 0x76, "CH0", TOPIC_BME_CH0_76_STATUS)
@@ -1152,17 +1152,17 @@ def publish_all_bme_statuses():
         try: pca9540.deselect_channels()
         except: pass
 
-    bme_ch1_77 = recover_bme_if_missing(bme_ch1_77, PCA9540B.CH1, 0x77, "CH1", TOPIC_BME_CH1_77_STATUS)
+    bme_ch1_76 = recover_bme_if_missing(bme_ch1_76, PCA9540B.CH1, 0x76, "CH1", TOPIC_BME_CH1_76_STATUS)
     try:
         pca9540.select_channel(PCA9540B.CH1)
         time.sleep(0.01)
-        if not publish_bme_sensor_state(bme_ch1_77, "CH1 0x77", TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_STATUS, TOPIC_BME_CH1_77_AVAIL):
-            bme_ch1_77 = None
+        if not publish_bme_sensor_state(bme_ch1_76, "CH1 0x76", TOPIC_BME_CH1_76_TEMP, TOPIC_BME_CH1_76_PRESS, TOPIC_BME_CH1_76_HUM, TOPIC_BME_CH1_76_STATUS, TOPIC_BME_CH1_76_AVAIL):
+            bme_ch1_76 = None
     except Exception as e:
         logger.error("BME280 CH1 mux/read error: %s", e)
-        bme_ch1_77 = None
-        publish_bme_data_unavailable(TOPIC_BME_CH1_77_TEMP, TOPIC_BME_CH1_77_PRESS, TOPIC_BME_CH1_77_HUM, TOPIC_BME_CH1_77_AVAIL)
-        client.publish(TOPIC_BME_CH1_77_STATUS, "read error", retain=True)
+        bme_ch1_76 = None
+        publish_bme_data_unavailable(TOPIC_BME_CH1_76_TEMP, TOPIC_BME_CH1_76_PRESS, TOPIC_BME_CH1_76_HUM, TOPIC_BME_CH1_76_AVAIL)
+        client.publish(TOPIC_BME_CH1_76_STATUS, "read error", retain=True)
     finally:
         try: pca9540.deselect_channels()
         except: pass
@@ -1569,9 +1569,9 @@ device_info_bme_ch0_77 = {
     "model": "BME280/BMP280",
 }
 
-device_info_bme_ch1_77 = {
-    "identifiers": ["pca9685_bme280_ch1_0x77"],
-    "name": "BME280 CH1 0x77",
+device_info_bme_ch1_76 = {
+    "identifiers": ["pca9685_bme280_ch1_0x76"],
+    "name": "BME280 CH1 0x76",
     "model": "BME280/BMP280",
 }
 
@@ -1927,39 +1927,39 @@ DISCOVERIES = [
         "state_topic": TOPIC_BME_CH0_77_STATUS,
         "device": device_info_bme_ch0_77,
     }),
-    # BME280 CH1 0x77
-    ("sensor", "bme280_ch1_0x77_temperature", {
-        "name": "Temperature CH1 0x77",
-        "unique_id": "bme280_ch1_0x77_temperature",
-        "state_topic": TOPIC_BME_CH1_77_TEMP,
-        "availability_topic": TOPIC_BME_CH1_77_AVAIL,
+    # BME280 CH1 0x76
+    ("sensor", "bme280_ch1_0x76_temperature", {
+        "name": "Temperature CH1 0x76",
+        "unique_id": "bme280_ch1_0x76_temperature",
+        "state_topic": TOPIC_BME_CH1_76_TEMP,
+        "availability_topic": TOPIC_BME_CH1_76_AVAIL,
         "unit_of_measurement": "°C",
         "device_class": "temperature",
-        "device": device_info_bme_ch1_77,
+        "device": device_info_bme_ch1_76,
     }),
-    ("sensor", "bme280_ch1_0x77_humidity", {
-        "name": "Humidity CH1 0x77",
-        "unique_id": "bme280_ch1_0x77_humidity",
-        "state_topic": TOPIC_BME_CH1_77_HUM,
-        "availability_topic": TOPIC_BME_CH1_77_AVAIL,
+    ("sensor", "bme280_ch1_0x76_humidity", {
+        "name": "Humidity CH1 0x76",
+        "unique_id": "bme280_ch1_0x76_humidity",
+        "state_topic": TOPIC_BME_CH1_76_HUM,
+        "availability_topic": TOPIC_BME_CH1_76_AVAIL,
         "unit_of_measurement": "%",
         "device_class": "humidity",
-        "device": device_info_bme_ch1_77,
+        "device": device_info_bme_ch1_76,
     }),
-    ("sensor", "bme280_ch1_0x77_pressure", {
-        "name": "Pressure CH1 0x77",
-        "unique_id": "bme280_ch1_0x77_pressure",
-        "state_topic": TOPIC_BME_CH1_77_PRESS,
-        "availability_topic": TOPIC_BME_CH1_77_AVAIL,
+    ("sensor", "bme280_ch1_0x76_pressure", {
+        "name": "Pressure CH1 0x76",
+        "unique_id": "bme280_ch1_0x76_pressure",
+        "state_topic": TOPIC_BME_CH1_76_PRESS,
+        "availability_topic": TOPIC_BME_CH1_76_AVAIL,
         "unit_of_measurement": "hPa",
         "device_class": "pressure",
-        "device": device_info_bme_ch1_77,
+        "device": device_info_bme_ch1_76,
     }),
-    ("sensor", "bme280_ch1_0x77_status", {
-        "name": "Value Status CH1 0x77",
-        "unique_id": "bme280_ch1_0x77_status",
-        "state_topic": TOPIC_BME_CH1_77_STATUS,
-        "device": device_info_bme_ch1_77,
+    ("sensor", "bme280_ch1_0x76_status", {
+        "name": "Value Status CH1 0x76",
+        "unique_id": "bme280_ch1_0x76_status",
+        "state_topic": TOPIC_BME_CH1_76_STATUS,
+        "device": device_info_bme_ch1_76,
     }),
     # TAXO status (TAXO1 under FAN 1, TAXO2 under FAN 2)
     ("binary_sensor", "status_taxo1", {
