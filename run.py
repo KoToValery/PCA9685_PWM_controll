@@ -32,19 +32,42 @@ try:
     logger.info("Checking i2c-dev module...")
     subprocess.run(["modprobe", "i2c-dev"], check=True)
 except subprocess.CalledProcessError as e:
-    logger.error("Failed to load i2c-dev module: %s", e)
-    sys.exit(1)
+    logger.warning("Failed to load i2c-dev module with modprobe: %s", e)
 except Exception as e:
     logger.warning("Failed to run modprobe i2c-dev: %s", e)
 
 # Global I2C synchronization
 I2C_BUS = 1
 i2c_lock = threading.Lock()
-try:
-    shared_bus = SMBus(I2C_BUS)
-except Exception as e:
-    logger.error("Failed to open I2C bus %d: %s", I2C_BUS, e)
-    sys.exit(1)
+shared_bus = None
+
+
+def open_i2c_bus_with_retry(bus_id: int, attempts: int = 10, initial_delay: float = 3.0) -> SMBus:
+    if initial_delay > 0:
+        logger.info("Waiting %.1fs before opening I2C bus %d...", initial_delay, bus_id)
+        time.sleep(initial_delay)
+
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            bus = SMBus(bus_id)
+            logger.info("I2C bus %d opened", bus_id)
+            return bus
+        except Exception as e:
+            last_error = e
+            delay = min(5.0, 1.5 ** (attempt - 1))
+            if attempt < attempts:
+                logger.warning(
+                    "Attempt %d/%d: Cannot open I2C bus %d (%s). Retrying in %.1fs...",
+                    attempt,
+                    attempts,
+                    bus_id,
+                    e,
+                    delay,
+                )
+                time.sleep(delay)
+
+    raise RuntimeError(f"Failed to open I2C bus {bus_id} after {attempts} attempts: {last_error}")
 
 MODE1 = 0x00
 MODE2 = 0x01
@@ -328,6 +351,9 @@ PCA9540_ADDR = int(config.get("pca9540_address", "0x70"), 16)
 BME_INTERVAL = int(config.get("bme_interval", 30))
 STARTUP_DIAGNOSTIC_MIN_DURATION = 3.0
 STARTUP_RESULT_BLINK_DURATION = 5.0
+I2C_OPEN_ATTEMPTS = 10
+I2C_OPEN_INITIAL_DELAY = 3.0
+PCA9685_INIT_ATTEMPTS = 30
 PCA_FREQ = int(config.get("pca_frequency", 1000))
 
 DEFAULT_DUTY_CYCLE = int(config.get("default_duty_cycle", 30))
@@ -337,6 +363,16 @@ PU_DEFAULT_HZ = float(config.get("pu_default_hz", 10.0))
 PU_DEFAULT_HZ = max(0.0, PU_DEFAULT_HZ)
 
 MQTT_DEEP_CLEAN = config.get("mqtt_deep_clean", False)
+
+try:
+    shared_bus = open_i2c_bus_with_retry(
+        I2C_BUS,
+        attempts=I2C_OPEN_ATTEMPTS,
+        initial_delay=I2C_OPEN_INITIAL_DELAY,
+    )
+except Exception as e:
+    logger.error("Fatal: %s", e)
+    sys.exit(1)
 
 is_cleaning = False
 found_topics = set()
@@ -794,7 +830,7 @@ def channel_off(channel: int):
 
 logger.info("Opening I2C bus %s, PCA9685 addr=%s", I2C_BUS, hex(PCA_ADDR))
 pca = None
-for attempt in range(1, 11):
+for attempt in range(1, PCA9685_INIT_ATTEMPTS + 1):
     try:
         pca = PCA9685(shared_bus, PCA_ADDR)
         pca.set_pwm_freq(PCA_FREQ)
@@ -802,11 +838,16 @@ for attempt in range(1, 11):
         logger.info("PCA9685 global PWM frequency set to %s Hz", PCA_FREQ)
         break
     except Exception as e:
-        logger.warning("Attempt %d/10: Cannot initialize PCA9685 (%s). Retrying in 2s...", attempt, e)
+        logger.warning(
+            "Attempt %d/%d: Cannot initialize PCA9685 (%s). Retrying in 2s...",
+            attempt,
+            PCA9685_INIT_ATTEMPTS,
+            e,
+        )
         time.sleep(2)
 
 if pca is None:
-    logger.error("Fatal: Failed to initialize PCA9685 after 10 attempts.")
+    logger.error("Fatal: Failed to initialize PCA9685 after %d attempts.", PCA9685_INIT_ATTEMPTS)
     sys.exit(1)
 
 
